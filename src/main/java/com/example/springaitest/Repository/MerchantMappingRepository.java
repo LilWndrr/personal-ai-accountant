@@ -5,7 +5,13 @@ import org.hibernate.boot.models.JpaAnnotations;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
+import java.util.List;
+
 @Repository
 public interface MerchantMappingRepository extends JpaRepository<MerchantMapping,Long> {
-    MerchantMapping findByTelegramUserIdAndMerchantKeyword(Long telegramUserId, String merchantKeyword);
+    List<MerchantMapping> findByTelegramUserId(Long telegramUserId);
+
+    List<MerchantMapping> findByTelegramUserIdOrTelegramUserId(Long userId, Long systemId);
+
+
 }
