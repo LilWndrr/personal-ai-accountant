@@ -1,15 +1,24 @@
 package com.example.springaitest.config;
 
-import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-@RequiredArgsConstructor
 @Configuration
 public class OllamaConfig {
-    @Bean
-    ChatClient chatClient(ChatClient.Builder builder){
-        return builder.defaultSystem("You are Micheline stared chef cook").build();
+
+    @Bean("chefChatClient")
+    ChatClient chefChatClient(ChatClient.Builder builder) {
+        return builder.defaultSystem("You are Michelin starred chef cook").build();
+    }
+
+    @Bean("financeChatClient")
+    ChatClient financeChatClient(ChatClient.Builder builder) {
+        return builder.defaultSystem("""
+            You are a precise financial data analyst. You parse bank
+            statements and categorize transactions. You understand Turkish
+            banking terminology. Always return structured JSON. Never guess
+            amounts — if unclear, mark as null.
+            """).build();
     }
 }
