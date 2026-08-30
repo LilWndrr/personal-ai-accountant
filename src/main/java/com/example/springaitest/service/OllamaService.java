@@ -1,22 +1,27 @@
 package com.example.springaitest.service;
 
 import com.example.springaitest.domain.Recipe;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.ollama.OllamaChatModel;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 
-@RequiredArgsConstructor
 @Slf4j
 @Service
 public class OllamaService {
 
     private final OllamaChatModel chatModel;
     private final ChatClient chatClient;
+
+    public OllamaService(OllamaChatModel chatModel,
+                          @Qualifier("chefChatClient") ChatClient chatClient) {
+        this.chatModel = chatModel;
+        this.chatClient = chatClient;
+    }
 
     public String getResponse(String message){
         log.info("Received message: {}" , message);
