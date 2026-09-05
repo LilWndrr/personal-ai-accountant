@@ -15,6 +15,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Service;
 
+import org.springframework.transaction.annotation.Transactional;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -56,15 +58,19 @@ public class CategorizationService {
     private double confidenceThreshold;
 
 
+    @Transactional(readOnly = true)
     public CategorizationResult categorize(List<ParsedTransaction> transactions, Long userId) {
 
         List<CategorizedTransaction> autoCategorized = new ArrayList<>();
         List<Integer> needsAiIndices = new ArrayList<>();
 
+        // Load ALL mappings ONCE before the loop (fixes N+1 query problem)
+        List<MerchantMapping> userMappings = merchantMappingRepository.findByTelegramUserId(userId);
+        List<MerchantMapping> systemMappings = merchantMappingRepository.findByTelegramUserId(0L);
 
         for (int i = 0; i < transactions.size(); i++) {
             ParsedTransaction tx = transactions.get(i);
-            Optional<Category> match = findMatchedCategoryFromCache(tx.description(), userId);
+            Optional<Category> match = findMatchedCategoryFromCache(tx.description(), userMappings, systemMappings);
 
             if (match.isPresent()) {
                 autoCategorized.add(new CategorizedTransaction(
@@ -84,17 +90,11 @@ public class CategorizationService {
         List<CategorizedTransaction> needsReview = new ArrayList<>();
 
         if (!needsAiIndices.isEmpty()) {
-
             List<ParsedTransaction> forAi = needsAiIndices.stream()
                     .map(transactions::get)
                     .toList();
-
-
             List<String> allCategoryNames = getAllCategoryNames(userId);
-
             List<CategorizedTransaction> aiResults = callLLMforCategorization(forAi, needsAiIndices, allCategoryNames);
-
-
             for (CategorizedTransaction result : aiResults) {
                 if (result.confidence() >= confidenceThreshold) {
                     autoCategorized.add(result);
@@ -148,21 +148,18 @@ public class CategorizationService {
                 .toList();
     }
 
-    private Optional<Category> findMatchedCategoryFromCache(String description, Long userId) {
-
-        List<MerchantMapping> userMappings = merchantMappingRepository.findByTelegramUserId(userId);
-        List<MerchantMapping> systemMappings = merchantMappingRepository.findByTelegramUserId(0L);
+    private Optional<Category> findMatchedCategoryFromCache(String description,
+                                                             List<MerchantMapping> userMappings,
+                                                             List<MerchantMapping> systemMappings) {
 
         Locale turkish = Locale.of("tr", "TR");
         String upperDesc = description.toUpperCase(turkish);
-
 
         for (MerchantMapping mapping : userMappings) {
             if (upperDesc.contains(mapping.getMerchantKeyword().toUpperCase(turkish))) {
                 return Optional.of(mapping.getCategory());
             }
         }
-
 
         for (MerchantMapping mapping : systemMappings) {
             if (upperDesc.contains(mapping.getMerchantKeyword().toUpperCase(turkish))) {
