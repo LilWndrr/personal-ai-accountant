@@ -12,5 +12,5 @@ public interface MerchantMappingRepository extends JpaRepository<MerchantMapping
 
     List<MerchantMapping> findByTelegramUserIdOrTelegramUserId(Long userId, Long systemId);
 
-
+    boolean existsByMerchantKeywordAndTelegramUserId(String merchantKeyword, Long telegramUserId);
 }
