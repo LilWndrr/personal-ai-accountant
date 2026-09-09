@@ -26,33 +26,32 @@ import java.util.stream.Stream;
 @Service
 public class CategorizationService {
 
-    private final ChatClient chat;
+    private final org.springframework.ai.chat.model.ChatModel chatModel;
     private final MerchantMappingRepository merchantMappingRepository;
     private final CategoryRepository categoryRepository;
 
-    public CategorizationService(@Qualifier("financeChatClient") ChatClient chat,
+    public CategorizationService(org.springframework.ai.chat.model.ChatModel chatModel,
                                  MerchantMappingRepository merchantMappingRepository,
                                  CategoryRepository categoryRepository) {
-        this.chat = chat;
+        this.chatModel = chatModel;
         this.merchantMappingRepository = merchantMappingRepository;
         this.categoryRepository = categoryRepository;
     }
 
     private static final String CATEGORIZATION_SYSTEM_PROMPT = """
-        You are a financial categorization assistant.
-        Categorize each bank transaction into the most appropriate category.
-        
-        Rules:
-        - Use an existing category if it fits.
-        - If no existing category fits, suggest a new one.
-        - Extract the merchant/store name from the description.
-        - Rate your confidence from 0.0 to 1.0.
-        - For Turkish transaction descriptions, common patterns:
-          POS ALIŞVERİŞ = card purchase
-          HAVALE = money transfer
-          EFT = electronic transfer
-          MAAŞ = salary
-    """;
+            You are a financial categorization assistant.
+            You will be given a list of transactions and a list of available categories.
+            Your task is to assign the best matching category to each transaction based on its merchant name and description.
+            If the list of available categories is empty, or NO existing category matches well, YOU MUST INVENT a sensible, common personal finance category (e.g., 'Groceries', 'Transport', 'Utilities', 'Shopping', 'Dining', 'Income', etc.).
+            Do NOT use 'Uncategorized' unless the transaction is completely incomprehensible.
+            Return a JSON array of CategorizedTransaction objects.
+            - Rate your confidence from 0.0 to 1.0.
+            - For Turkish transaction descriptions, common patterns:
+              POS ALIŞVERİŞ = card purchase
+              HAVALE = money transfer
+              EFT = electronic transfer
+              MAAŞ = salary
+        """;
 
     @Value("${app.categorization.confidence-threshold:0.7}")
     private double confidenceThreshold;
@@ -70,16 +69,16 @@ public class CategorizationService {
 
         for (int i = 0; i < transactions.size(); i++) {
             ParsedTransaction tx = transactions.get(i);
-            Optional<Category> match = findMatchedCategoryFromCache(tx.description(), userMappings, systemMappings);
+            Optional<Category> matched = findMatchedCategoryFromCache(tx.description(), userMappings, systemMappings);
 
-            if (match.isPresent()) {
+            if (matched.isPresent()) {
                 autoCategorized.add(new CategorizedTransaction(
                         i,
-                        match.get().getName(),
-                        match.get().getEmoji(),
+                        matched.get().getName(),
+                        matched.get().getEmoji(),
                         1.0,
                         tx.merchantName(),
-                        "Matched from merchant cache"
+                        "Matched from existing user rules"
                 ));
             } else {
                 needsAiIndices.add(i);
@@ -90,16 +89,41 @@ public class CategorizationService {
         List<CategorizedTransaction> needsReview = new ArrayList<>();
 
         if (!needsAiIndices.isEmpty()) {
-            List<ParsedTransaction> forAi = needsAiIndices.stream()
-                    .map(transactions::get)
-                    .toList();
             List<String> allCategoryNames = getAllCategoryNames(userId);
-            List<CategorizedTransaction> aiResults = callLLMforCategorization(forAi, needsAiIndices, allCategoryNames);
-            for (CategorizedTransaction result : aiResults) {
-                if (result.confidence() >= confidenceThreshold) {
-                    autoCategorized.add(result);
-                } else {
-                    needsReview.add(result);
+
+            // Process in small batches to avoid API timeouts
+            int batchSize = 5;
+            for (int batchStart = 0; batchStart < needsAiIndices.size(); batchStart += batchSize) {
+                int batchEnd = Math.min(batchStart + batchSize, needsAiIndices.size());
+                List<Integer> batchIndices = needsAiIndices.subList(batchStart, batchEnd);
+                List<ParsedTransaction> batchTransactions = batchIndices.stream()
+                        .map(transactions::get)
+                        .toList();
+
+                try {
+                    List<CategorizedTransaction> aiResults = callLLMforCategorization(
+                            batchTransactions, batchIndices, allCategoryNames);
+                    for (CategorizedTransaction result : aiResults) {
+                        if (result.confidence() >= confidenceThreshold) {
+                            autoCategorized.add(result);
+                        } else {
+                            needsReview.add(result);
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println("LLM Categorization failed for batch: " + e.getMessage());
+                    // Fallback: Send this batch to manual review if AI fails
+                    for (int i = 0; i < batchTransactions.size(); i++) {
+                        ParsedTransaction tx = batchTransactions.get(i);
+                        needsReview.add(new CategorizedTransaction(
+                                batchIndices.get(i),
+                                "Uncategorized",
+                                "❓",
+                                0.0,
+                                tx.merchantName(),
+                                "AI processing failed — needs manual review"
+                        ));
+                    }
                 }
             }
         }
@@ -125,18 +149,67 @@ public class CategorizationService {
         String formattedCategories = String.join(", ", categoryNames);
         String formattedTransactions = sb.toString();
 
-        return chat.prompt()
-                .system(CATEGORIZATION_SYSTEM_PROMPT)
-                .user(u -> u.text("""
-                        Categories: {categories}
-                        
-                        Transactions to categorize:
-                        {transactions}
-                        """)
-                        .param("categories", formattedCategories)
-                        .param("transactions", formattedTransactions))
-                .call()
-                .entity(new ParameterizedTypeReference<List<CategorizedTransaction>>() {});
+        String formatInstructions = """
+            You MUST return ONLY a JSON array. Do not include markdown formatting or backticks.
+            Example format:
+            [
+              {
+                "transactionIndex": 0,
+                "suggestedCategory": "Groceries",
+                "suggestedEmoji": "🛒",
+                "confidence": 0.95,
+                "merchantName": "Migros",
+                "reasoning": "Clear grocery store purchase"
+              }
+            ]
+            """;
+
+        String responseText = "";
+        try {
+            org.springframework.ai.chat.prompt.Prompt prompt = new org.springframework.ai.chat.prompt.Prompt(
+                    List.of(
+                            new org.springframework.ai.chat.messages.SystemMessage(CATEGORIZATION_SYSTEM_PROMPT + "\n\n" + formatInstructions),
+                            new org.springframework.ai.chat.messages.UserMessage("Categories: " + formattedCategories + "\n\nTransactions to categorize:\n" + formattedTransactions)
+                    )
+            );
+            responseText = chatModel.call(prompt).getResult().getOutput().getText();
+            System.out.println("========== AI RESPONSE SUCCESS ==========");
+            System.out.println(responseText);
+            System.out.println("=========================================");
+
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+            mapper.findAndRegisterModules(); // Needed for Java Records
+            
+            // Extract the JSON array using regex to handle conversational text
+            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\[.*\\]", java.util.regex.Pattern.DOTALL).matcher(responseText);
+            if (matcher.find()) {
+                responseText = matcher.group();
+            } else {
+                throw new RuntimeException("No JSON array found in response");
+            }
+            
+            List<CategorizedTransaction> parsedList = mapper.readValue(responseText, new com.fasterxml.jackson.core.type.TypeReference<List<CategorizedTransaction>>() {});
+            System.out.println("Parsed " + parsedList.size() + " transactions from AI JSON.");
+            return parsedList;
+        } catch (Exception e) {
+            System.err.println("============= AI PARSING FAILED =============");
+            System.err.println("Error: " + e.getMessage());
+            System.err.println("Raw Response Text: \n" + responseText);
+            e.printStackTrace();
+            System.err.println("=============================================");
+            
+            try {
+                java.nio.file.Files.writeString(
+                    java.nio.file.Paths.get("ai-response-debug.txt"), 
+                    "Error: " + e.getMessage() + "\n\nRaw Response:\n" + responseText
+                );
+            } catch (Exception ex) {
+                // Ignore file write errors
+            }
+            
+            throw new RuntimeException("JSON parsing failed", e);
+        }
     }
 
     private List<String> getAllCategoryNames(Long userId) {

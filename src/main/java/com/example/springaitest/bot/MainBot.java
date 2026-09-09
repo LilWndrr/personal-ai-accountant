@@ -7,6 +7,7 @@ import com.example.springaitest.bot.model.UserSessionService;
 import com.example.springaitest.bot.model.UserState;
 import com.example.springaitest.bot.service.CallbackHandlerService;
 import com.example.springaitest.bot.service.CustomCategoryService;
+import com.example.springaitest.bot.service.ReportService;
 import com.example.springaitest.bot.service.UploadWorkFlowService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -22,6 +23,7 @@ public class MainBot implements LongPollingSingleThreadUpdateConsumer {
     private final UploadWorkFlowService uploadWorkFlowService;
     private final CallbackHandlerService callbackHandlerService;
     private final CustomCategoryService customCategoryService;
+    private final ReportService reportService;
 
     @Override
     public void consume(Update update) {
@@ -42,6 +44,11 @@ public class MainBot implements LongPollingSingleThreadUpdateConsumer {
                 uploadWorkFlowService.processUpload(chatId, update.getMessage().getDocument());
             } else if (update.hasMessage() && update.getMessage().hasText()) {
                 commandHandler.handle(update);
+            } else if (update.hasCallbackQuery()) {
+                String callbackData = update.getCallbackQuery().getData();
+                if (callbackData.startsWith("report:")) {
+                    reportService.handleReportCallback(chatId, callbackData);
+                }
             }
 
         } else if (session.getUserState() == UserState.REVIEWING) {
@@ -56,3 +63,4 @@ public class MainBot implements LongPollingSingleThreadUpdateConsumer {
         }
     }
 }
+

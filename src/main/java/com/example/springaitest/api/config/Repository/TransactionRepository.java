@@ -15,4 +15,5 @@ public interface TransactionRepository extends JpaRepository<Transaction,Long> {
     Transaction findByTelegramUserIdAndCategoryIsNull(Long telegramUserId);
     List<Transaction> findByTelegramUserIdOrderByDateDesc(Long telegramUserId);
     List<Transaction> findByUploadBatchId(String uploadBatchId);
+    List<Transaction> findByTelegramUserIdAndTypeAndDateBetween(Long telegramUserId, TransactionType type, LocalDate startDate, LocalDate endDate);
 }

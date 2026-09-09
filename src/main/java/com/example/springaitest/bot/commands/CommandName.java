@@ -8,7 +8,8 @@ public enum CommandName {
     ASK_EXPERT("ASK_EXPERT_COMMAND"),
     QUESTION_HANDLER("QUESTION_HANDLER_COMMAND"),
     ASK("ASK_COMMAND"),
-    FACT("FACT_COMMAND");
+    FACT("FACT_COMMAND"),
+    REPORT("REPORT_COMMAND");
 
     private final String name;
 
