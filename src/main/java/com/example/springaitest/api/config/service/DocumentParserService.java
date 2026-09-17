@@ -66,8 +66,17 @@ public class DocumentParserService {
             // PDF still needs LLM because text extraction is messy
             rawText = extractFromPdf(document);
             log.info("Extracted raw text from PDF '{}'. Text length: {} characters", fileName, rawText.length());
+
+            if (rawText.isBlank() || rawText.length() < 50) {
+                log.warn("PDF '{}' produced almost no text ({} chars) — it may be a scanned/image PDF",
+                        fileName, rawText.length());
+                return Optional.empty();
+            }
+
+            // Send the text to the LLM in chunks — a single big request gets
+            // truncated by small models and the JSON response breaks.
             transactions = extractWithLLM(rawText);
-            log.info("LLM returned {} transactions", transactions != null ? transactions.size() : 0);
+            log.info("LLM returned {} transactions", transactions.size());
 
         } else {
             return Optional.empty();
@@ -256,11 +265,95 @@ public class DocumentParserService {
 
     // ==================== LLM PARSER (PDF only) ====================
 
+    /** Max characters per LLM request — keeps output within the model's limits. */
+    private static final int CHUNK_SIZE = 8_000;
+
+    /**
+     * Number of final lines carried over from a chunk into the next one, so a
+     * transaction spanning a chunk boundary still appears complete somewhere.
+     */
+    private static final int CHUNK_OVERLAP_LINES = 10;
+
     private List<ParsedTransaction> extractWithLLM(String rawText) {
-        return chat.prompt().system(PARSER_SYSTEM_PROMPT)
-                .user("Parse this bank statement:\n\n" + rawText)
-                .call().entity(new ParameterizedTypeReference<List<ParsedTransaction>>() {
-                });
+        List<String> chunks = splitIntoChunks(rawText, CHUNK_SIZE, CHUNK_OVERLAP_LINES);
+        log.info("Sending {} chunk(s) to LLM (total {} chars)", chunks.size(), rawText.length());
+
+        List<ParsedTransaction> all = new ArrayList<>();
+        for (int i = 0; i < chunks.size(); i++) {
+            try {
+                List<ParsedTransaction> chunkResult = chat.prompt()
+                        .system(PARSER_SYSTEM_PROMPT)
+                        .user("Parse this bank statement (part " + (i + 1) + "/" + chunks.size()
+                                + "). Note: this part may overlap with previous parts — extract every"
+                                + " complete transaction you can see; duplicates will be removed later."
+                                + " Ignore transactions whose row is cut off / incomplete:\n\n" + chunks.get(i))
+                        .call()
+                        .entity(new ParameterizedTypeReference<List<ParsedTransaction>>() {
+                        });
+                if (chunkResult != null) {
+                    all.addAll(chunkResult);
+                }
+                log.info("Chunk {}/{}: {} transactions extracted", i + 1, chunks.size(),
+                        chunkResult == null ? 0 : chunkResult.size());
+            } catch (Exception e) {
+                log.error("LLM failed to parse chunk {}/{}", i + 1, chunks.size(), e);
+            }
+        }
+
+        List<ParsedTransaction> deduped = deduplicate(all);
+        if (deduped.size() != all.size()) {
+            log.info("Removed {} duplicate transactions from chunk overlaps", all.size() - deduped.size());
+        }
+        return deduped;
+    }
+
+    /**
+     * Removes transactions appearing in more than one chunk due to chunk overlap.
+     * Two transactions are considered the same if date, amount and description match.
+     */
+    private List<ParsedTransaction> deduplicate(List<ParsedTransaction> transactions) {
+        List<ParsedTransaction> unique = new ArrayList<>();
+        for (ParsedTransaction t : transactions) {
+            String key = dedupKey(t);
+            boolean duplicate = unique.stream().anyMatch(u -> dedupKey(u).equals(key));
+            if (!duplicate) unique.add(t);
+        }
+        return unique;
+    }
+
+    private String dedupKey(ParsedTransaction t) {
+        String desc = t.description() == null ? "" : t.description().trim().toLowerCase();
+        return t.date() + "|" + t.amount() + "|" + t.balance() + "|" + desc;
+    }
+
+    /**
+     * Splits text into chunks at line boundaries so transaction rows are never
+     * cut in half. Each chunk repeats the last {@code overlapLines} lines of the
+     * previous chunk, guaranteeing that a multi-line transaction record crossing
+     * a boundary is still seen completely in at least one chunk.
+     */
+    private List<String> splitIntoChunks(String text, int chunkSize, int overlapLines) {
+        List<String> chunks = new ArrayList<>();
+        String[] lines = text.split("\\R");
+
+        StringBuilder current = new StringBuilder();
+        List<String> currentLines = new ArrayList<>();
+
+        for (String line : lines) {
+            if (current.length() + line.length() + 1 > chunkSize && current.length() > 0) {
+                chunks.add(current.toString());
+                current.setLength(0);
+                // Carry over the last lines as overlap into the next chunk
+                currentLines = currentLines.subList(Math.max(0, currentLines.size() - overlapLines), currentLines.size());
+                for (String overlap : currentLines) {
+                    current.append(overlap).append('\n');
+                }
+            }
+            current.append(line).append('\n');
+            currentLines.add(line);
+        }
+        if (current.length() > 0) chunks.add(current.toString());
+        return chunks;
     }
 
     private ValidationResult validateTransactions(List<ParsedTransaction> transactions) {
@@ -278,13 +371,10 @@ public class DocumentParserService {
     }
 
     private String extractFromPdf(InputStream document) {
-        try {
-            PDDocument pdf = Loader.loadPDF(document.readAllBytes());
+        try (PDDocument pdf = Loader.loadPDF(document.readAllBytes())) {
             PDFTextStripper stripper = new PDFTextStripper();
             stripper.setSortByPosition(true);
-            String text = stripper.getText(pdf);
-            pdf.close();
-            return text;
+            return stripper.getText(pdf);
         } catch (IOException e) {
             throw new RuntimeException("Failed to read PDF file", e);
         }

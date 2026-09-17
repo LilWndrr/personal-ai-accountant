@@ -38,9 +38,12 @@ public class CallbackHandlerService {
     private final CategoryRepository categoryRepository;
     private final TransactionRepository transactionRepository;
     private final MerchantMappingRepository merchantMappingRepository;
+    private final MessageTrackerService messageTrackerService;
 
     public void handleCallback(Long chatId, String data){
         UserSession session = sessionService.getSession(chatId);
+
+        messageTrackerService.deleteLastMessage(chatId);
       String[] parts =  data.split(":");
 
         if (session.getUserState() != UserState.REVIEWING) return;
