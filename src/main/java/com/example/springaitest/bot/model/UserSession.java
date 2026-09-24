@@ -31,4 +31,6 @@ public class UserSession {
 
     private String uploadBatch;
 
+    private String bankName;
+
 }

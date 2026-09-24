@@ -41,10 +41,17 @@ public class CustomCategoryService {
     public void handleCategoryCreating(Long chatId, String categoryName) {
         UserSession session = userSessionService.getSession(chatId);
 
-        Category category = categoryRepository.findByNameAndTelegramUserId(categoryName, chatId)
-                .orElseGet(() -> categoryRepository.save(
-                        Category.builder().name(categoryName).custom(true).telegramUserId(chatId).build()
-                ));
+        Category category = categoryRepository.findByNameAndTelegramUserId(categoryName, 0L).orElse(null);
+        if(category==null){
+
+            category = categoryRepository.findByNameAndTelegramUserId(categoryName, chatId)
+                    .orElseGet(() -> categoryRepository.save(
+                            Category.builder().name(categoryName).custom(true).telegramUserId(chatId).build()
+                    ));
+        }
+
+
+
 
 
         CategorizedTransaction review = session.getPendingReview().get(session.getCurrentReviewIndex());
@@ -56,6 +63,8 @@ public class CustomCategoryService {
                 .amount(BigDecimal.valueOf(original.amount()))
                 .type(original.amount() < 0 ? TransactionType.EXPENSE : TransactionType.INCOME)
                 .description(original.description())
+                .merchantName(original.merchantName())
+                .bankName(session.getBankName())
                 .category(category) // <-- Map it to your shiny new category!
                 .uploadBatchId(session.getUploadBatch())
                 .uploadedAt(LocalDateTime.now())

@@ -5,6 +5,7 @@ public record ParsedTransaction(
         String description,
         double amount,
         double balance,
-        String merchantName
+        String merchantName,
+        String bankName
 ) {
 }

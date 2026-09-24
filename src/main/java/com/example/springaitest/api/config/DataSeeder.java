@@ -85,6 +85,12 @@ public class DataSeeder implements CommandLineRunner {
             Map.entry("SHELL",          "Ulaşım"),
             Map.entry("BP",             "Ulaşım"),
             Map.entry("UBER",           "Ulaşım"),
+            Map.entry("TCDD",           "Ulaşım"),
+            Map.entry("EGO KART",       "Ulaşım"),
+            Map.entry("IETT",           "Ulaşım"),
+            Map.entry("ISTANBULKART",   "Ulaşım"),
+            Map.entry("BILETALL",       "Ulaşım"),
+            Map.entry("OBILET",         "Ulaşım"),
             // Abonelikler
             Map.entry("NETFLIX",        "Abonelikler"),
             Map.entry("SPOTIFY",        "Abonelikler"),

@@ -35,6 +35,8 @@ public class Transaction {
     @JoinColumn(name = "category_id")
     private Category category;
     private String merchantName;
+    @Column(name = "bank_name")
+    private String bankName;
     @Column(length = 1000)
     private String rawText;
     @Column(name = "telegram_user_id", nullable = false)

@@ -42,6 +42,9 @@ public class DocumentParserService {
           for decimals (e.g., "1.234,56" = 1234.56). Convert to plain decimal.
         - Extract the merchant/store name from the description if present.
         - Include the balance after each transaction if available.
+        - Extract the bank name from the statement header/logo if visible
+          (e.g., "Garanti BBVA", "Yapı Kredi", "Ziraat", "İş Bankası", etc.).
+          Set bankName on each transaction. If the bank cannot be determined, use null.
         - If a field cannot be determined, use null.
         """;
 
@@ -49,6 +52,7 @@ public class DocumentParserService {
 
         List<ParsedTransaction> transactions;
         String rawText;
+        String bankName = detectBankFromFileName(fileName);
 
         if (fileName.toLowerCase().endsWith(".xlsx") || fileName.toLowerCase().endsWith(".xls")) {
             // DIRECT PARSING — No LLM needed!
@@ -78,14 +82,23 @@ public class DocumentParserService {
             transactions = extractWithLLM(rawText);
             log.info("LLM returned {} transactions", transactions.size());
 
+            // Try to pick up bank name from LLM-parsed transactions if not detected from filename
+            if (bankName == null) {
+                bankName = transactions.stream()
+                        .map(ParsedTransaction::bankName)
+                        .filter(b -> b != null && !b.isBlank())
+                        .findFirst()
+                        .orElse(null);
+            }
+
         } else {
             return Optional.empty();
         }
 
-        log.info("Total parsed transactions: {}", transactions.size());
+        log.info("Total parsed transactions: {} (bank: {})", transactions.size(), bankName);
 
         ValidationResult validationResult = validateTransactions(transactions);
-        return Optional.of(new ParsedResult(transactions, validationResult, rawText));
+        return Optional.of(new ParsedResult(transactions, validationResult, rawText, bankName));
     }
 
     // ==================== DIRECT XLSX PARSER ====================
@@ -148,7 +161,7 @@ public class DocumentParserService {
                     balance = parseTurkishNumber(getCellString(row.getCell(balanceCol)).trim());
                 }
 
-                transactions.add(new ParsedTransaction(date, desc, amount, balance, null));
+                transactions.add(new ParsedTransaction(date, desc, amount, balance, null, null));
             }
 
         } catch (Exception e) {
@@ -203,7 +216,7 @@ public class DocumentParserService {
                     balance = parseTurkishNumber(cols[balanceCol].trim().replace("\"", ""));
                 }
 
-                transactions.add(new ParsedTransaction(date, desc, amount, balance, null));
+                transactions.add(new ParsedTransaction(date, desc, amount, balance, null, null));
             }
         } catch (IOException e) {
             throw new RuntimeException("Failed to parse CSV file", e);
@@ -378,6 +391,34 @@ public class DocumentParserService {
         } catch (IOException e) {
             throw new RuntimeException("Failed to read PDF file", e);
         }
+    }
+
+    // ==================== BANK NAME DETECTION ====================
+
+    /**
+     * Tries to detect the bank name from the uploaded file name.
+     * Many Turkish banks include their name in exported file names.
+     */
+    private String detectBankFromFileName(String fileName) {
+        if (fileName == null) return null;
+        String lower = fileName.toLowerCase(java.util.Locale.of("tr", "TR"));
+
+        if (lower.contains("garanti")) return "Garanti BBVA";
+        if (lower.contains("yapikredi") || lower.contains("yapı kredi") || lower.contains("ykb")) return "Yapı Kredi";
+        if (lower.contains("ziraat")) return "Ziraat Bankası";
+        if (lower.contains("isbank") || lower.contains("İş bank") || lower.contains("isbankasi")) return "İş Bankası";
+        if (lower.contains("akbank")) return "Akbank";
+        if (lower.contains("halkbank") || lower.contains("halk bank")) return "Halkbank";
+        if (lower.contains("vakifbank") || lower.contains("vakıfbank")) return "VakıfBank";
+        if (lower.contains("denizbank")) return "DenizBank";
+        if (lower.contains("qnb") || lower.contains("finansbank")) return "QNB Finansbank";
+        if (lower.contains("teb")) return "TEB";
+        if (lower.contains("enpara")) return "Enpara";
+        if (lower.contains("papara")) return "Papara";
+        if (lower.contains("tosla")) return "Tosla";
+        if (lower.contains("ininal") || lower.contains("İninal")) return "İninal";
+
+        return null;
     }
 }
 

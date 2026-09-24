@@ -10,6 +10,8 @@ import com.example.springaitest.api.config.dto.CategorizationResult;
 import com.example.springaitest.api.config.dto.CategorizedTransaction;
 import com.example.springaitest.api.config.dto.ParsedTransaction;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
@@ -26,11 +28,14 @@ import java.util.stream.Stream;
 @Service
 public class CategorizationService {
 
-    private final org.springframework.ai.chat.model.ChatModel chatModel;
+    private final ChatModel chatModel;
     private final MerchantMappingRepository merchantMappingRepository;
     private final CategoryRepository categoryRepository;
 
-    public CategorizationService(org.springframework.ai.chat.model.ChatModel chatModel,
+    @Value("${app.categorization.model}")
+    private String categorizationModel;
+
+    public CategorizationService(ChatModel chatModel,
                                  MerchantMappingRepository merchantMappingRepository,
                                  CategoryRepository categoryRepository) {
         this.chatModel = chatModel;
@@ -91,8 +96,10 @@ public class CategorizationService {
         if (!needsAiIndices.isEmpty()) {
             List<String> allCategoryNames = getAllCategoryNames(userId);
 
-            // Process in small batches to avoid API timeouts
-            int batchSize = 5;
+            // Process in large batches to avoid API rate limits and concurrency issues
+            int batchSize = 50;
+            List<java.util.concurrent.CompletableFuture<List<CategorizedTransaction>>> futures = new ArrayList<>();
+
             for (int batchStart = 0; batchStart < needsAiIndices.size(); batchStart += batchSize) {
                 int batchEnd = Math.min(batchStart + batchSize, needsAiIndices.size());
                 List<Integer> batchIndices = needsAiIndices.subList(batchStart, batchEnd);
@@ -100,30 +107,41 @@ public class CategorizationService {
                         .map(transactions::get)
                         .toList();
 
-                try {
-                    List<CategorizedTransaction> aiResults = callLLMforCategorization(
-                            batchTransactions, batchIndices, allCategoryNames);
-                    for (CategorizedTransaction result : aiResults) {
-                        if (result.confidence() >= confidenceThreshold) {
-                            autoCategorized.add(result);
-                        } else {
-                            needsReview.add(result);
+                java.util.concurrent.CompletableFuture<List<CategorizedTransaction>> future = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return callLLMforCategorization(batchTransactions, batchIndices, allCategoryNames);
+                    } catch (Exception e) {
+                        System.err.println("LLM Categorization failed for batch: " + e.getMessage());
+                        // Fallback: Send this batch to manual review if AI fails
+                        List<CategorizedTransaction> failedBatch = new ArrayList<>();
+                        for (int i = 0; i < batchTransactions.size(); i++) {
+                            ParsedTransaction tx = batchTransactions.get(i);
+                            failedBatch.add(new CategorizedTransaction(
+                                    batchIndices.get(i),
+                                    "Uncategorized",
+                                    "❓",
+                                    0.0,
+                                    tx.merchantName(),
+                                    "AI processing failed — needs manual review"
+                            ));
                         }
+                        return failedBatch;
                     }
-                } catch (Exception e) {
-                    System.err.println("LLM Categorization failed for batch: " + e.getMessage());
-                    // Fallback: Send this batch to manual review if AI fails
-                    for (int i = 0; i < batchTransactions.size(); i++) {
-                        ParsedTransaction tx = batchTransactions.get(i);
-                        needsReview.add(new CategorizedTransaction(
-                                batchIndices.get(i),
-                                "Uncategorized",
-                                "❓",
-                                0.0,
-                                tx.merchantName(),
-                                "AI processing failed — needs manual review"
-                        ));
-                    }
+                });
+                futures.add(future);
+            }
+
+            // Wait for all batches to complete and collect results
+            List<CategorizedTransaction> allAiResults = futures.stream()
+                    .map(java.util.concurrent.CompletableFuture::join)
+                    .flatMap(List::stream)
+                    .toList();
+
+            for (CategorizedTransaction result : allAiResults) {
+                if (result.confidence() >= confidenceThreshold) {
+                    autoCategorized.add(result);
+                } else {
+                    needsReview.add(result);
                 }
             }
         }
@@ -166,11 +184,18 @@ public class CategorizationService {
 
         String responseText = "";
         try {
+            // Override the model to use the categorization-specific model
+            // (the default ChatModel uses the vision model for PDF parsing)
+            OpenAiChatOptions modelOverride = OpenAiChatOptions.builder()
+                    .model(categorizationModel)
+                    .build();
+
             org.springframework.ai.chat.prompt.Prompt prompt = new org.springframework.ai.chat.prompt.Prompt(
                     List.of(
                             new org.springframework.ai.chat.messages.SystemMessage(CATEGORIZATION_SYSTEM_PROMPT + "\n\n" + formatInstructions),
                             new org.springframework.ai.chat.messages.UserMessage("Categories: " + formattedCategories + "\n\nTransactions to categorize:\n" + formattedTransactions)
-                    )
+                    ),
+                    modelOverride
             );
             responseText = chatModel.call(prompt).getResult().getOutput().getText();
             System.out.println("========== AI RESPONSE SUCCESS ==========");
@@ -188,6 +213,10 @@ public class CategorizationService {
             } else {
                 throw new RuntimeException("No JSON array found in response");
             }
+            
+            // Repair malformed JSON: fix missing opening braces in array elements
+            // LLMs sometimes produce: [{...},"key":...}] instead of [{...},{"key":...}]
+            responseText = responseText.replaceAll("},\\s*\"(\\w+)\"\\s*:", "},{\"$1\":");
             
             List<CategorizedTransaction> parsedList = mapper.readValue(responseText, new com.fasterxml.jackson.core.type.TypeReference<List<CategorizedTransaction>>() {});
             System.out.println("Parsed " + parsedList.size() + " transactions from AI JSON.");

@@ -12,6 +12,7 @@ import com.example.springaitest.api.config.dto.ParsedResult;
 import com.example.springaitest.api.config.dto.ParsedTransaction;
 import com.example.springaitest.api.config.service.CategorizationService;
 import com.example.springaitest.api.config.service.DocumentParserService;
+import com.example.springaitest.api.config.service.TransactionDeduplicationService;
 import com.example.springaitest.bot.events.MessageEvent;
 import com.example.springaitest.bot.model.UserSession;
 import com.example.springaitest.bot.model.UserSessionService;
@@ -49,6 +50,7 @@ public class UploadWorkFlowService {
     private final TransactionRepository transactionRepository;
     private final CategoryRepository categoryRepository;
     private final ApplicationEventPublisher eventPublisher;
+    private final TransactionDeduplicationService deduplicationService;
 
 
     public void processUpload(Long chatId, Document telegramDoc) {
@@ -70,7 +72,31 @@ public class UploadWorkFlowService {
             return;
         }
 
+        String bankName = parsedResult.bankName();
         List<ParsedTransaction> parsedTransactions = parsedResult.transactions();
+
+        // Filter out duplicate transactions that already exist in the database
+        int totalParsed = parsedTransactions.size();
+        parsedTransactions = deduplicationService.filterDuplicates(parsedTransactions, bankName, chatId);
+        int duplicateCount = totalParsed - parsedTransactions.size();
+
+        if (duplicateCount > 0) {
+            eventPublisher.publishEvent(new MessageEvent(this,
+                    SendMessage.builder().chatId(chatId)
+                            .text("⚠️ Skipped " + duplicateCount + " duplicate transaction(s) already in your records.")
+                            .build()
+            ));
+        }
+
+        if (parsedTransactions.isEmpty()) {
+            eventPublisher.publishEvent(new MessageEvent(this,
+                    SendMessage.builder().chatId(chatId)
+                            .text("ℹ️ All transactions in this file are already in your records. Nothing new to save!")
+                            .build()
+            ));
+            userSessionService.getSession(chatId).setUserState(UserState.IDLE);
+            return;
+        }
 
         CategorizationResult categorizationResult = categorizationService.categorize(parsedTransactions, chatId);
 
@@ -82,13 +108,22 @@ public class UploadWorkFlowService {
             ParsedTransaction original = parsedTransactions.get(ct.transactionIndex());
             Category category = categoryRepository.findByNameAndTelegramUserId(ct.suggestedCategory(), chatId)
                     .or(() -> categoryRepository.findByNameAndTelegramUserId(ct.suggestedCategory(), 0L))
-                    .orElse(null);
+                    .orElseGet(() -> categoryRepository.save(
+                            Category.builder()
+                                    .name(ct.suggestedCategory())
+                                    .emoji(ct.suggestedEmoji())
+                                    .custom(true)
+                                    .telegramUserId(chatId)
+                                    .build()
+                    ));
             Transaction entity = Transaction.builder()
-                    .date(LocalDate.parse(original.date(), DateTimeFormatter.ofPattern("dd.MM.yyyy")))
+                    .date(LocalDate.parse(original.date(), DateTimeFormatter.ofPattern("dd[.][/][-]MM[.][/][-]yyyy")))
                     .balance(BigDecimal.valueOf(original.balance()))
                     .amount(BigDecimal.valueOf(original.amount()))
                     .type(original.amount() < 0 ? TransactionType.EXPENSE : TransactionType.INCOME)
                     .description(original.description())
+                    .merchantName(original.merchantName())
+                    .bankName(bankName)
                     .category(category)
                     .uploadBatchId(batchId)
                     .uploadedAt(LocalDateTime.now())
@@ -106,6 +141,7 @@ public class UploadWorkFlowService {
             session.setOriginalTransactions(parsedTransactions);
             session.setCurrentReviewIndex(0);
             session.setUploadBatch(batchId);
+            session.setBankName(bankName);
             eventPublisher.publishEvent(new MessageEvent(this,buildReviewMessage(chatId, session)));
         } else {
 
