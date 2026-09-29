@@ -35,9 +35,10 @@ public class CategorizationService {
     @Value("${app.categorization.model}")
     private String categorizationModel;
 
-    public CategorizationService(ChatModel chatModel,
-                                 MerchantMappingRepository merchantMappingRepository,
-                                 CategoryRepository categoryRepository) {
+    public CategorizationService(
+            ChatModel chatModel,
+            MerchantMappingRepository merchantMappingRepository,
+            CategoryRepository categoryRepository) {
         this.chatModel = chatModel;
         this.merchantMappingRepository = merchantMappingRepository;
         this.categoryRepository = categoryRepository;
@@ -96,9 +97,9 @@ public class CategorizationService {
         if (!needsAiIndices.isEmpty()) {
             List<String> allCategoryNames = getAllCategoryNames(userId);
 
-            // Process in large batches to avoid API rate limits and concurrency issues
-            int batchSize = 50;
-            List<java.util.concurrent.CompletableFuture<List<CategorizedTransaction>>> futures = new ArrayList<>();
+            // Process sequentially in batches of 10 to prevent thread deadlocks and API rate limits
+            int batchSize = 5;
+            List<CategorizedTransaction> allAiResults = new ArrayList<>();
 
             for (int batchStart = 0; batchStart < needsAiIndices.size(); batchStart += batchSize) {
                 int batchEnd = Math.min(batchStart + batchSize, needsAiIndices.size());
@@ -107,35 +108,25 @@ public class CategorizationService {
                         .map(transactions::get)
                         .toList();
 
-                java.util.concurrent.CompletableFuture<List<CategorizedTransaction>> future = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
-                    try {
-                        return callLLMforCategorization(batchTransactions, batchIndices, allCategoryNames);
-                    } catch (Exception e) {
-                        System.err.println("LLM Categorization failed for batch: " + e.getMessage());
-                        // Fallback: Send this batch to manual review if AI fails
-                        List<CategorizedTransaction> failedBatch = new ArrayList<>();
-                        for (int i = 0; i < batchTransactions.size(); i++) {
-                            ParsedTransaction tx = batchTransactions.get(i);
-                            failedBatch.add(new CategorizedTransaction(
-                                    batchIndices.get(i),
-                                    "Uncategorized",
-                                    "❓",
-                                    0.0,
-                                    tx.merchantName(),
-                                    "AI processing failed — needs manual review"
-                            ));
-                        }
-                        return failedBatch;
+                try {
+                    List<CategorizedTransaction> batchResults = callLLMforCategorization(batchTransactions, batchIndices, allCategoryNames);
+                    allAiResults.addAll(batchResults);
+                } catch (Exception e) {
+                    System.err.println("LLM Categorization failed for batch: " + e.getMessage());
+                    // Fallback: Send this batch to manual review if AI fails
+                    for (int i = 0; i < batchTransactions.size(); i++) {
+                        ParsedTransaction tx = batchTransactions.get(i);
+                        allAiResults.add(new CategorizedTransaction(
+                                batchIndices.get(i),
+                                "Uncategorized",
+                                "❓",
+                                0.0,
+                                tx.merchantName(),
+                                "AI processing failed — needs manual review"
+                        ));
                     }
-                });
-                futures.add(future);
+                }
             }
-
-            // Wait for all batches to complete and collect results
-            List<CategorizedTransaction> allAiResults = futures.stream()
-                    .map(java.util.concurrent.CompletableFuture::join)
-                    .flatMap(List::stream)
-                    .toList();
 
             for (CategorizedTransaction result : allAiResults) {
                 if (result.confidence() >= confidenceThreshold) {
@@ -185,7 +176,6 @@ public class CategorizationService {
         String responseText = "";
         try {
             // Override the model to use the categorization-specific model
-            // (the default ChatModel uses the vision model for PDF parsing)
             OpenAiChatOptions modelOverride = OpenAiChatOptions.builder()
                     .model(categorizationModel)
                     .build();

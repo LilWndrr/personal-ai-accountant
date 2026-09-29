@@ -5,13 +5,20 @@ import com.example.springaitest.api.config.dto.ParsedTransaction;
 import com.example.springaitest.api.config.dto.ValidationResult;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.rendering.ImageType;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.poi.ss.usermodel.*;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.ParameterizedTypeReference;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.util.MimeTypeUtils;
+
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -53,33 +60,44 @@ public class DocumentParserService {
         List<ParsedTransaction> transactions;
         String rawText;
         String bankName = detectBankFromFileName(fileName);
+        
+        byte[] fileBytes;
+        try {
+            fileBytes = document.readAllBytes();
+        } catch (IOException e) {
+            log.error("Failed to read file", e);
+            return Optional.empty();
+        }
 
         if (fileName.toLowerCase().endsWith(".xlsx") || fileName.toLowerCase().endsWith(".xls")) {
             // DIRECT PARSING — No LLM needed!
             log.info("Parsing xlsx/xls file directly: {}", fileName);
-            transactions = parseXlsxDirectly(document);
+            transactions = parseXlsxDirectly(new ByteArrayInputStream(fileBytes));
             rawText = "Direct xlsx parse: " + transactions.size() + " transactions";
 
         } else if (fileName.toLowerCase().endsWith(".csv")) {
             // DIRECT PARSING — No LLM needed!
             log.info("Parsing csv file directly: {}", fileName);
-            transactions = parseCsvDirectly(document);
+            transactions = parseCsvDirectly(new ByteArrayInputStream(fileBytes));
             rawText = "Direct csv parse: " + transactions.size() + " transactions";
 
         } else if (fileName.toLowerCase().endsWith(".pdf")) {
-            // PDF still needs LLM because text extraction is messy
-            rawText = extractFromPdf(document);
+            // First try to extract digital text
+            rawText = extractFromPdf(fileBytes);
             log.info("Extracted raw text from PDF '{}'. Text length: {} characters", fileName, rawText.length());
 
             if (rawText.isBlank() || rawText.length() < 50) {
-                log.warn("PDF '{}' produced almost no text ({} chars) — it may be a scanned/image PDF",
+                log.warn("PDF '{}' produced almost no text ({} chars) — it may be a scanned/image PDF. Switching to Vision model...",
                         fileName, rawText.length());
-                return Optional.empty();
+                
+                // Fallback to Vision processing
+                transactions = extractWithVisionLLM(fileBytes);
+                rawText = "Parsed via Vision API. " + transactions.size() + " transactions found.";
+            } else {
+                // Send the text to the LLM in chunks
+                transactions = extractWithLLM(rawText);
             }
-
-            // Send the text to the LLM in chunks — a single big request gets
-            // truncated by small models and the JSON response breaks.
-            transactions = extractWithLLM(rawText);
+            
             log.info("LLM returned {} transactions", transactions.size());
 
             // Try to pick up bank name from LLM-parsed transactions if not detected from filename
@@ -383,14 +401,87 @@ public class DocumentParserService {
         return new ValidationResult(invalidIndices.isEmpty(), invalidIndices);
     }
 
-    private String extractFromPdf(InputStream document) {
-        try (PDDocument pdf = Loader.loadPDF(document.readAllBytes())) {
+    private String extractFromPdf(byte[] pdfBytes) {
+        try (PDDocument pdf = Loader.loadPDF(pdfBytes)) {
             PDFTextStripper stripper = new PDFTextStripper();
             stripper.setSortByPosition(true);
             return stripper.getText(pdf);
         } catch (IOException e) {
             throw new RuntimeException("Failed to read PDF file", e);
         }
+    }
+
+    // ==================== VISION LLM PARSER (Scanned PDF) ====================
+
+    private List<ParsedTransaction> extractWithVisionLLM(byte[] pdfBytes) {
+        log.info("Starting Vision LLM parsing for scanned PDF...");
+        List<ParsedTransaction> allTransactions = new ArrayList<>();
+        
+        try (PDDocument pdf = Loader.loadPDF(pdfBytes)) {
+            PDFRenderer renderer = new PDFRenderer(pdf);
+            
+            // Process all pages in the PDF
+            int maxPages = pdf.getNumberOfPages();
+            log.info("Rendering {} pages to images for Vision API...", maxPages);
+            
+            for (int i = 0; i < maxPages; i++) {
+                BufferedImage image = renderer.renderImageWithDPI(i, 150, ImageType.RGB);
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                ImageIO.write(image, "png", baos);
+                byte[] imageBytes = baos.toByteArray();
+                
+                boolean success = false;
+                int attempts = 0;
+                while (!success && attempts < 3) {
+                    attempts++;
+                    try {
+                        log.info("Sending page {}/{} to Vision LLM (Attempt {})...", i + 1, maxPages, attempts);
+                        List<ParsedTransaction> chunkResult = chat.prompt()
+                                .system(PARSER_SYSTEM_PROMPT)
+                                .user(u -> u.text("Parse this bank statement page image. Extract every complete transaction you can see. If the row is cut off, ignore it.")
+                                            .media(MimeTypeUtils.IMAGE_PNG, new org.springframework.core.io.ByteArrayResource(imageBytes)))
+                                .call()
+                                .entity(new ParameterizedTypeReference<List<ParsedTransaction>>() {});
+                                
+                        if (chunkResult != null) {
+                            allTransactions.addAll(chunkResult);
+                        }
+                        log.info("Vision LLM returned {} transactions for page {}", 
+                                chunkResult == null ? 0 : chunkResult.size(), i + 1);
+                        success = true;
+                    } catch (Exception e) {
+                        log.error("Vision LLM failed to parse page {} (Attempt {})", i + 1, attempts, e);
+                        if (attempts < 3) {
+                            log.info("Waiting 15 seconds before retrying...");
+                            try {
+                                Thread.sleep(15000);
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                // Add a delay between successful pages to prevent rate limiting (429) on free tier APIs
+                if (success && i < maxPages - 1) {
+                    try {
+                        log.info("Sleeping 10 seconds to respect free API rate limits...");
+                        Thread.sleep(10000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+        } catch (IOException e) {
+            log.error("Failed to render PDF to images", e);
+        }
+        
+        List<ParsedTransaction> deduped = deduplicate(allTransactions);
+        if (deduped.size() != allTransactions.size()) {
+            log.info("Removed {} duplicate transactions from image overlaps", allTransactions.size() - deduped.size());
+        }
+        return deduped;
     }
 
     // ==================== BANK NAME DETECTION ====================

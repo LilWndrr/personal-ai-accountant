@@ -63,6 +63,7 @@ public class UploadWorkFlowService {
         InputStream file = fileService.downloadFile(telegramDoc.getFileId());
 
         ParsedResult parsedResult = parserService.parse(file, telegramDoc.getFileName()).orElse(null);
+        log.info("Finished parsing file: {}", telegramDoc.getFileName());
 
         if (parsedResult == null || parsedResult.transactions() == null || parsedResult.transactions().isEmpty()) {
             eventPublisher.publishEvent(new MessageEvent(this,
@@ -98,6 +99,7 @@ public class UploadWorkFlowService {
             return;
         }
 
+        log.info("Started categorization for {} transactions", parsedTransactions.size());
         CategorizationResult categorizationResult = categorizationService.categorize(parsedTransactions, chatId);
 
         String batchId = UUID.randomUUID().toString();
