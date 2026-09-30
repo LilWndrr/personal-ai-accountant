@@ -22,10 +22,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
+import org.telegram.telegrambots.meta.api.methods.send.SendChatAction;
 import org.telegram.telegrambots.meta.api.objects.Document;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardRow;
+import org.springframework.scheduling.annotation.Async;
 
 import java.io.InputStream;
 import java.math.BigDecimal;
@@ -53,11 +55,16 @@ public class UploadWorkFlowService {
     private final TransactionDeduplicationService deduplicationService;
 
 
+    @Async
     public void processUpload(Long chatId, Document telegramDoc) {
         userSessionService.getSession(chatId).setUserState(UserState.PROCESSING);
 
         eventPublisher.publishEvent(new MessageEvent(this,
                 SendMessage.builder().chatId(chatId).text("📄 Processing " + telegramDoc.getFileName() + "...").build()
+        ));
+        
+        eventPublisher.publishEvent(new MessageEvent(this,
+                SendChatAction.builder().chatId(chatId).action("typing").build()
         ));
 
         InputStream file = fileService.downloadFile(telegramDoc.getFileId());

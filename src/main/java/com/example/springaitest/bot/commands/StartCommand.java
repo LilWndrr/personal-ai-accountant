@@ -3,6 +3,7 @@ package com.example.springaitest.bot.commands;
 import com.example.springaitest.bot.events.MessageEvent;
 import com.example.springaitest.bot.model.UserSessionService;
 import com.example.springaitest.bot.model.UserState;
+import com.example.springaitest.bot.service.KeyboardService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.ApplicationEvent;
 import org.springframework.context.ApplicationEventPublisher;
@@ -16,6 +17,7 @@ import org.telegram.telegrambots.meta.api.objects.Update;
 public class StartCommand implements Command{
 
     private final ApplicationEventPublisher applicationEventPublisher;
+    private final KeyboardService keyboardService;
     private final UserSessionService sessionService;
 
     @Override
@@ -37,8 +39,8 @@ public class StartCommand implements Command{
             SendMessage message = SendMessage // Create a message object
                     .builder()
                     .chatId(chatId)
-                    .text("Hello")
-
+                    .text("Welcome!")
+                    .replyMarkup(keyboardService.mainMenu(chatId))
                     .build();
             applicationEventPublisher.publishEvent(new MessageEvent(this, message));
         }
