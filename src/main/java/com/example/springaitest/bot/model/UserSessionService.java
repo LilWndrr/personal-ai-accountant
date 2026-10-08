@@ -24,6 +24,8 @@ public class UserSessionService {
                     .id(UUID.randomUUID().toString()) // or Long depending on what you chose
                     .chatId(id)
                     .userState(UserState.IDLE)
+                    .remainingCategorizations(5)
+                    .lastCategorizationDate(java.time.LocalDate.now())
                     .build();
         });
     }

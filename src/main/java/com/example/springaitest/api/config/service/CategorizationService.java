@@ -97,7 +97,7 @@ public class CategorizationService {
         if (!needsAiIndices.isEmpty()) {
             List<String> allCategoryNames = getAllCategoryNames(userId);
 
-            // Process sequentially in batches of 10 to prevent thread deadlocks and API rate limits
+            // Process sequentially in batches of 5 to prevent thread deadlocks and API rate limits
             int batchSize = 5;
             List<CategorizedTransaction> allAiResults = new ArrayList<>();
 
@@ -187,6 +187,7 @@ public class CategorizationService {
                     ),
                     modelOverride
             );
+
             responseText = chatModel.call(prompt).getResult().getOutput().getText();
             System.out.println("========== AI RESPONSE SUCCESS ==========");
             System.out.println(responseText);

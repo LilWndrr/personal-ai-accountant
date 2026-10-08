@@ -5,12 +5,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
-public class OllamaConfig {
+public class ModelConfig {
 
-    @Bean("chefChatClient")
-    ChatClient chefChatClient(ChatClient.Builder builder) {
-        return builder.defaultSystem("You are Michelin starred chef cook").build();
-    }
 
     /**
      * Finance ChatClient — used by DocumentParserService for PDF parsing.

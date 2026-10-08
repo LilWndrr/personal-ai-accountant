@@ -57,7 +57,27 @@ public class UploadWorkFlowService {
 
     @Async
     public void processUpload(Long chatId, Document telegramDoc) {
-        userSessionService.getSession(chatId).setUserState(UserState.PROCESSING);
+        UserSession session = userSessionService.getSession(chatId);
+        java.time.LocalDate today = java.time.LocalDate.now();
+        
+        if (session.getLastCategorizationDate() == null || session.getLastCategorizationDate().isBefore(today)) {
+            session.setRemainingCategorizations(5);
+            session.setLastCategorizationDate(today);
+        }
+
+        if (session.getRemainingCategorizations() <= 0) {
+            eventPublisher.publishEvent(new MessageEvent(this,
+                    SendMessage.builder().chatId(chatId)
+                            .text("⚠️ You've reached your daily limit of 5 file uploads. Please try again tomorrow!")
+                            .build()
+            ));
+            return;
+        }
+
+        session.setRemainingCategorizations(session.getRemainingCategorizations() - 1);
+        session.setLastCategorizationDate(today);
+
+        session.setUserState(UserState.PROCESSING);
 
         eventPublisher.publishEvent(new MessageEvent(this,
                 SendMessage.builder().chatId(chatId).text("📄 Processing " + telegramDoc.getFileName() + "...").build()
@@ -142,7 +162,6 @@ public class UploadWorkFlowService {
 
         }
         transactionRepository.saveAll(entitiesToSave);
-        UserSession session = userSessionService.getSession(chatId);
         if (categorizationResult.needsReview() != null && !categorizationResult.needsReview().isEmpty()) {
 
             session.setPendingReview(categorizationResult.needsReview());

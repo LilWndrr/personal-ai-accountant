@@ -33,4 +33,7 @@ public class UserSession {
 
     private String bankName;
 
+    private int remainingCategorizations;
+    private java.time.LocalDate lastCategorizationDate;
+
 }
