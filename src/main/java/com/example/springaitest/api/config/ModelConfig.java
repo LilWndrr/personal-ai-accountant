@@ -8,10 +8,7 @@ import org.springframework.context.annotation.Configuration;
 public class ModelConfig {
 
 
-    /**
-     * Finance ChatClient — used by DocumentParserService for PDF parsing.
-     * Uses the default vision model (llama-3.2-11b-vision-instruct).
-     */
+
     @Bean("financeChatClient")
     ChatClient financeChatClient(ChatClient.Builder builder) {
         return builder.defaultSystem("""
@@ -22,11 +19,7 @@ public class ModelConfig {
             """).build();
     }
 
-    /**
-     * Categorization ChatClient — uses a text-focused model (configured
-     * via app.categorization.model property) for better classification
-     * accuracy than the vision model.
-     */
+
     @Bean("categorizationChatClient")
     ChatClient categorizationChatClient(ChatClient.Builder builder) {
         return builder.defaultSystem("""

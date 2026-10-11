@@ -39,4 +39,11 @@ public interface TransactionRepository extends JpaRepository<Transaction,Long> {
             @Param("bankName") String bankName,
             @Param("startDate") LocalDate startDate,
             @Param("endDate") LocalDate endDate);
+
+    @Query("SELECT t FROM Transaction t WHERE t.telegramUserId = :userId " +
+           "AND t.date BETWEEN :startDate AND :endDate")
+    List<Transaction> findByUserAndDateRange(
+            @Param("userId") Long telegramUserId,
+            @Param("startDate") LocalDate startDate,
+            @Param("endDate") LocalDate endDate);
 }

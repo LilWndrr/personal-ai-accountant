@@ -18,8 +18,6 @@ public class Transaction {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
-
-
     @Column(nullable = false)
     private LocalDate date;
     @Column(nullable = false, length = 500)

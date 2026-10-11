@@ -38,7 +38,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-import static reactor.netty.http.HttpConnectionLiveness.log;
+
 
 @Service
 @Slf4j
@@ -74,7 +74,7 @@ public class UploadWorkFlowService {
             return;
         }
 
-        session.setRemainingCategorizations(session.getRemainingCategorizations() - 1);
+
         session.setLastCategorizationDate(today);
 
         session.setUserState(UserState.PROCESSING);
@@ -89,7 +89,33 @@ public class UploadWorkFlowService {
 
         InputStream file = fileService.downloadFile(telegramDoc.getFileId());
 
-        ParsedResult parsedResult = parserService.parse(file, telegramDoc.getFileName()).orElse(null);
+        if(file==null){
+            eventPublisher.publishEvent(new MessageEvent(this,SendMessage.builder().chatId(chatId).text("File size should be less than 5 Mb").build()));
+            userSessionService.getSession(chatId).setUserState(UserState.IDLE);
+
+            return;
+        }else{
+            session.setRemainingCategorizations(session.getRemainingCategorizations() - 1);
+        }
+
+        ParsedResult parsedResult;
+        try {
+            parsedResult = parserService.parse(file, telegramDoc.getFileName()).orElse(null);
+        } catch (IllegalArgumentException e) {
+            log.warn("Document parsing validation failed: {}", e.getMessage());
+            eventPublisher.publishEvent(new MessageEvent(this,
+                    SendMessage.builder().chatId(chatId).text("⚠️ " + e.getMessage()).build()
+            ));
+            userSessionService.getSession(chatId).setUserState(UserState.IDLE);
+            return;
+        } catch (Exception e) {
+            log.error("Failed to parse document: {}", telegramDoc.getFileName(), e);
+            eventPublisher.publishEvent(new MessageEvent(this,
+                    SendMessage.builder().chatId(chatId).text("❌ Failed to process document. Please try again.").build()
+            ));
+            userSessionService.getSession(chatId).setUserState(UserState.IDLE);
+            return;
+        }
         log.info("Finished parsing file: {}", telegramDoc.getFileName());
 
         if (parsedResult == null || parsedResult.transactions() == null || parsedResult.transactions().isEmpty()) {

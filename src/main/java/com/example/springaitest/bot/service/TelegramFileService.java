@@ -17,6 +17,8 @@ public class TelegramFileService {
 
     private final TelegramClient telegramClient;
 
+    private static final long MAX_FILE_SIZE = 10L * 1024 * 1024;
+
     public InputStream downloadFile(String fileId) {
         try {
             log.info("Requesting file info for fileId: {}", fileId);
@@ -24,7 +26,10 @@ public class TelegramFileService {
 
             GetFile getFileRequest = new GetFile(fileId);
             File telegramFile = telegramClient.execute(getFileRequest);
-            
+
+            if(telegramFile.getFileSize() != null && telegramFile.getFileSize()>MAX_FILE_SIZE){
+                return null;
+            }
 
             log.info("Downloading file from path: {}", telegramFile.getFilePath());
             return telegramClient.downloadFileAsStream(telegramFile);

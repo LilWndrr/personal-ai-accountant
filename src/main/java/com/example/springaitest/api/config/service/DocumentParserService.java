@@ -13,6 +13,9 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.ParameterizedTypeReference;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.util.MimeTypeUtils;
@@ -23,6 +26,7 @@ import java.awt.image.BufferedImage;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -32,27 +36,35 @@ import java.util.stream.Collectors;
 public class DocumentParserService {
 
     private final ChatClient chat;
+    private static final int MAX_PDF_PAGES = 20;
+    private final ObjectMapper objectMapper = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+            .findAndRegisterModules();
 
     public DocumentParserService(@Qualifier("financeChatClient") ChatClient chat) {
         this.chat = chat;
     }
 
     private static final String PARSER_SYSTEM_PROMPT = """
-        You are a bank statement parser. Extract ALL transactions from the raw
-        text of a bank statement.
+        You are an expert bank statement parser. Extract ALL transactions from the statement table image.
         
-        Rules:
-        - Parse every transaction row. Do NOT skip any.
-        - Negative amounts are expenses, positive amounts are income.
-        - Dates may be DD/MM/YYYY or DD.MM.YYYY — normalize to DD.MM.YYYY.
-        - Amounts use Turkish format: period for thousands separator, comma
-          for decimals (e.g., "1.234,56" = 1234.56). Convert to plain decimal.
-        - Extract the merchant/store name from the description if present.
-        - Include the balance after each transaction if available.
-        - Extract the bank name from the statement header/logo if visible
-          (e.g., "Garanti BBVA", "Yapı Kredi", "Ziraat", "İş Bankası", etc.).
-          Set bankName on each transaction. If the bank cannot be determined, use null.
-        - If a field cannot be determined, use null.
+        TABLE STRUCTURE RULES:
+        - Each horizontal row in the table represents EXACTLY ONE transaction.
+        - The 'İşlem Tutarı' (or 'Tutar') column is the transaction 'amount'.
+        - Negative numbers are expenses (e.g. -7.700,00 TL), positive numbers are income (e.g. 11.632,50 TL).
+        - The 'Bakiye' column is ONLY the account balance after the transaction. Put it in the 'balance' field.
+          CRITICAL: NEVER create a separate transaction for the 'Bakiye' (Balance) column!
+        - IGNORE placeholder, header, or pending rows where amount is 0,00 TL, or date is '-' (such as 'Diğer Bekleyen İşlemler').
+        - Extract merchant/store name from 'Açıklama' if present, otherwise set to null.
+        - Extract the bank name from the statement header or logo (e.g. 'Yapı Kredi', 'Ziraat', 'Garanti BBVA', etc.).
+        
+        OUTPUT FORMAT:
+        - Output ONLY a raw JSON array of objects starting with [ and ending with ].
+        - Absolutely NO conversational text, explanations, or markdown blocks before or after.
+        Example format:
+        [
+          {"date": "31/08/2026", "amount": 11632.50, "balance": 31706.29, "description": "MAAŞ ÖDEMESİ", "bankName": "Yapı Kredi"}
+        ]
         """;
 
     public Optional<ParsedResult> parse(InputStream document, String fileName) {
@@ -60,7 +72,8 @@ public class DocumentParserService {
         List<ParsedTransaction> transactions;
         String rawText;
         String bankName = detectBankFromFileName(fileName);
-        
+
+
         byte[] fileBytes;
         try {
             fileBytes = document.readAllBytes();
@@ -82,26 +95,34 @@ public class DocumentParserService {
             rawText = "Direct csv parse: " + transactions.size() + " transactions";
 
         } else if (fileName.toLowerCase().endsWith(".pdf")) {
-            // First try to extract digital text
-            rawText = extractFromPdf(fileBytes);
-            log.info("Extracted raw text from PDF '{}'. Text length: {} characters", fileName, rawText.length());
+            log.info("Processing PDF file with Vision LLM: {}", fileName);
+            try (PDDocument pdf = Loader.loadPDF(fileBytes)) {
+                int pageCount = pdf.getNumberOfPages();
+                log.info("PDF '{}' has {} page(s)", fileName, pageCount);
 
-            if (rawText.isBlank() || rawText.length() < 50) {
-                log.warn("PDF '{}' produced almost no text ({} chars) — it may be a scanned/image PDF. Switching to Vision model...",
-                        fileName, rawText.length());
-                
-                // Fallback to Vision processing
-                transactions = extractWithVisionLLM(fileBytes);
+                if (pageCount > MAX_PDF_PAGES) {
+                    log.warn("PDF page count ({}) exceeds maximum allowed ({})", pageCount, MAX_PDF_PAGES);
+                    throw new IllegalArgumentException(
+                            String.format("PDF has %d pages. Maximum allowed is %d pages.", pageCount, MAX_PDF_PAGES)
+                    );
+                }
+
+                transactions = extractWithVisionLLM(pdf, pageCount);
                 rawText = "Parsed via Vision API. " + transactions.size() + " transactions found.";
-            } else {
-                // Send the text to the LLM in chunks
-                transactions = extractWithLLM(rawText);
+            } catch (IOException e) {
+                log.error("Failed to load PDF file", e);
+                return Optional.empty();
             }
-            
-            log.info("LLM returned {} transactions", transactions.size());
+
+            log.info("Vision LLM returned {} transactions", transactions.size());
+            for (int idx = 0; idx < transactions.size(); idx++) {
+                ParsedTransaction pt = transactions.get(idx);
+                log.info("  -> [{}] Date: {}, Amount: {}, Balance: {}, Desc: '{}'",
+                        idx + 1, pt.date(), pt.amount(), pt.balance(), pt.description());
+            }
 
             // Try to pick up bank name from LLM-parsed transactions if not detected from filename
-            if (bankName == null) {
+            if (bankName == null && transactions != null) {
                 bankName = transactions.stream()
                         .map(ParsedTransaction::bankName)
                         .filter(b -> b != null && !b.isBlank())
@@ -250,18 +271,20 @@ public class DocumentParserService {
      * Also handles plain numbers like "1234.56" or "-77,00"
      */
     private double parseTurkishNumber(String value) {
-        if (value == null || value.isEmpty()) return 0;
-        value = value.trim().replace(" ", "");
+        if (value == null || value.isBlank()) return 0;
+        // Strip out currency letters/symbols (e.g. TL, TRY, $, €) and whitespace
+        value = value.replaceAll("[^0-9.,\\-]", "").trim();
+        if (value.isEmpty() || value.equals("-")) return 0;
 
-        // If both period and comma exist, and comma comes last → Turkish format
+        // If both period and comma exist, and comma comes last → Turkish format: 1.234,56
         if (value.contains(".") && value.contains(",")) {
             value = value.replace(".", "");  // Remove thousands separator
             value = value.replace(",", "."); // Convert decimal separator
         } else if (value.contains(",")) {
-            // Only comma → it's the decimal separator
+            // Only comma → it's the decimal separator: 77,00
             value = value.replace(",", ".");
         }
-        // If only period → it's already standard format
+        // If only period → it's already standard decimal format: 1234.56
 
         try {
             return Double.parseDouble(value);
@@ -294,53 +317,129 @@ public class DocumentParserService {
         };
     }
 
-    // ==================== LLM PARSER (PDF only) ====================
+    // ==================== VISION LLM PARSER (PDF) ====================
 
-    /** Max characters per LLM request — keeps output within the model's limits. */
-    private static final int CHUNK_SIZE = 8_000;
+    private List<ParsedTransaction> extractWithVisionLLM(PDDocument pdf, int maxPages) {
+        log.info("Starting Vision LLM parsing for {} page(s)...", maxPages);
+        List<ParsedTransaction> allTransactions = new ArrayList<>();
+        PDFRenderer renderer = new PDFRenderer(pdf);
 
-    /**
-     * Number of final lines carried over from a chunk into the next one, so a
-     * transaction spanning a chunk boundary still appears complete somewhere.
-     */
-    private static final int CHUNK_OVERLAP_LINES = 10;
-
-    private List<ParsedTransaction> extractWithLLM(String rawText) {
-        List<String> chunks = splitIntoChunks(rawText, CHUNK_SIZE, CHUNK_OVERLAP_LINES);
-        log.info("Sending {} chunk(s) to LLM (total {} chars)", chunks.size(), rawText.length());
-
-        List<ParsedTransaction> all = new ArrayList<>();
-        for (int i = 0; i < chunks.size(); i++) {
+        for (int i = 0; i < maxPages; i++) {
+            byte[] imageBytes;
             try {
-                List<ParsedTransaction> chunkResult = chat.prompt()
-                        .system(PARSER_SYSTEM_PROMPT)
-                        .user("Parse this bank statement (part " + (i + 1) + "/" + chunks.size()
-                                + "). Note: this part may overlap with previous parts — extract every"
-                                + " complete transaction you can see; duplicates will be removed later."
-                                + " Ignore transactions whose row is cut off / incomplete:\n\n" + chunks.get(i))
-                        .call()
-                        .entity(new ParameterizedTypeReference<List<ParsedTransaction>>() {
-                        });
-                if (chunkResult != null) {
-                    all.addAll(chunkResult);
+                BufferedImage image = renderer.renderImageWithDPI(i, 150, ImageType.RGB);
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                ImageIO.write(image, "png", baos);
+                imageBytes = baos.toByteArray();
+            } catch (IOException e) {
+                log.error("Failed to render page {} to image", i + 1, e);
+                continue;
+            }
+
+            boolean success = false;
+            int attempts = 0;
+            while (!success && attempts < 3) {
+                attempts++;
+                try {
+                    log.info("Sending page {}/{} to Vision LLM (Attempt {})...", i + 1, maxPages, attempts);
+                    String rawResponse = chat.prompt()
+                            .system(PARSER_SYSTEM_PROMPT)
+                            .options(OpenAiChatOptions.builder()
+                                    .temperature(0.1)
+                                    .build())
+                            .user(u -> u.text("Extract all transactions from this bank statement page image into a JSON array. Return ONLY the JSON array starting with [ and ending with ].")
+                                        .media(MimeTypeUtils.IMAGE_PNG, new org.springframework.core.io.ByteArrayResource(imageBytes)))
+                            .call()
+                            .content();
+
+                    log.info("Page {} Vision Raw Response:\n{}", i + 1, rawResponse);
+
+                    List<ParsedTransaction> chunkResult = parseJsonArray(rawResponse);
+
+                    if (chunkResult != null && !chunkResult.isEmpty()) {
+                        allTransactions.addAll(chunkResult);
+                    }
+                    log.info("Vision LLM returned {} transactions for page {}", 
+                            chunkResult == null ? 0 : chunkResult.size(), i + 1);
+                    success = true;
+                } catch (Exception e) {
+                    log.error("Vision LLM failed to parse page {} (Attempt {})", i + 1, attempts, e);
+                    if (attempts < 3) {
+                        log.info("Waiting 5 seconds before retrying...");
+                        try {
+                            Thread.sleep(5000);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
                 }
-                log.info("Chunk {}/{}: {} transactions extracted", i + 1, chunks.size(),
-                        chunkResult == null ? 0 : chunkResult.size());
-            } catch (Exception e) {
-                log.error("LLM failed to parse chunk {}/{}", i + 1, chunks.size(), e);
+            }
+
+            // Respect rate limits between pages
+            if (success && i < maxPages - 1) {
+                try {
+                    log.info("Sleeping 3 seconds between pages to respect API limits...");
+                    Thread.sleep(3000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
             }
         }
 
-        List<ParsedTransaction> deduped = deduplicate(all);
-        if (deduped.size() != all.size()) {
-            log.info("Removed {} duplicate transactions from chunk overlaps", all.size() - deduped.size());
+        List<ParsedTransaction> deduped = deduplicate(allTransactions);
+        if (deduped.size() != allTransactions.size()) {
+            log.info("Removed {} duplicate transactions from image overlaps", allTransactions.size() - deduped.size());
         }
         return deduped;
     }
 
+    private List<ParsedTransaction> parseJsonArray(String rawResponse) {
+        if (rawResponse == null || rawResponse.isBlank()) {
+            return Collections.emptyList();
+        }
+        try {
+            int start = rawResponse.indexOf('[');
+            int end = rawResponse.lastIndexOf(']');
+            if (start != -1 && end != -1 && end > start) {
+                String json = rawResponse.substring(start, end + 1);
+                com.fasterxml.jackson.databind.JsonNode root = objectMapper.readTree(json);
+                if (root.isArray()) {
+                    List<ParsedTransaction> result = new ArrayList<>();
+                    for (com.fasterxml.jackson.databind.JsonNode node : root) {
+                        String date = node.path("date").asText("").trim();
+                        String desc = node.path("description").asText("").trim();
+                        double amount = parseTurkishNumber(node.path("amount").asText("0"));
+                        double balance = parseTurkishNumber(node.path("balance").asText("0"));
+                        String merchant = node.hasNonNull("merchantName") ? node.path("merchantName").asText() : null;
+                        String bank = node.hasNonNull("bankName") ? node.path("bankName").asText() : null;
+
+                        // Filter out pending, placeholder, or zero-amount non-transactions
+                        if (amount == 0.0 && balance == 0.0) {
+                            log.info("Skipping zero-amount/balance placeholder row: '{}'", desc);
+                            continue;
+                        }
+                        if (date.isBlank() || date.equals("-") || desc.toLowerCase().contains("bekleyen işlem")) {
+                            log.info("Skipping pending/placeholder row: date='{}', desc='{}'", date, desc);
+                            continue;
+                        }
+
+                        result.add(new ParsedTransaction(date, desc, amount, balance, merchant, bank));
+                    }
+                    return result;
+                }
+            } else {
+                log.warn("No JSON array bracket found in LLM vision response: {}", rawResponse);
+            }
+        } catch (Exception e) {
+            log.error("Failed to parse JSON array from Vision LLM response: {}", rawResponse, e);
+        }
+        return Collections.emptyList();
+    }
+
     /**
-     * Removes transactions appearing in more than one chunk due to chunk overlap.
-     * Two transactions are considered the same if date, amount and description match.
+     * Removes duplicate transactions across pages.
+     * Two transactions are considered the same if date, amount, balance and description match.
      */
     private List<ParsedTransaction> deduplicate(List<ParsedTransaction> transactions) {
         List<ParsedTransaction> unique = new ArrayList<>();
@@ -357,36 +456,6 @@ public class DocumentParserService {
         return t.date() + "|" + t.amount() + "|" + t.balance() + "|" + desc;
     }
 
-    /**
-     * Splits text into chunks at line boundaries so transaction rows are never
-     * cut in half. Each chunk repeats the last {@code overlapLines} lines of the
-     * previous chunk, guaranteeing that a multi-line transaction record crossing
-     * a boundary is still seen completely in at least one chunk.
-     */
-    private List<String> splitIntoChunks(String text, int chunkSize, int overlapLines) {
-        List<String> chunks = new ArrayList<>();
-        String[] lines = text.split("\\R");
-
-        StringBuilder current = new StringBuilder();
-        List<String> currentLines = new ArrayList<>();
-
-        for (String line : lines) {
-            if (current.length() + line.length() + 1 > chunkSize && current.length() > 0) {
-                chunks.add(current.toString());
-                current.setLength(0);
-                // Carry over the last lines as overlap into the next chunk
-                currentLines = currentLines.subList(Math.max(0, currentLines.size() - overlapLines), currentLines.size());
-                for (String overlap : currentLines) {
-                    current.append(overlap).append('\n');
-                }
-            }
-            current.append(line).append('\n');
-            currentLines.add(line);
-        }
-        if (current.length() > 0) chunks.add(current.toString());
-        return chunks;
-    }
-
     private ValidationResult validateTransactions(List<ParsedTransaction> transactions) {
         List<Integer> invalidIndices = new ArrayList<>();
         for (int i = 1; i < transactions.size(); i++) {
@@ -399,89 +468,6 @@ public class DocumentParserService {
             }
         }
         return new ValidationResult(invalidIndices.isEmpty(), invalidIndices);
-    }
-
-    private String extractFromPdf(byte[] pdfBytes) {
-        try (PDDocument pdf = Loader.loadPDF(pdfBytes)) {
-            PDFTextStripper stripper = new PDFTextStripper();
-            stripper.setSortByPosition(true);
-            return stripper.getText(pdf);
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to read PDF file", e);
-        }
-    }
-
-    // ==================== VISION LLM PARSER (Scanned PDF) ====================
-
-    private List<ParsedTransaction> extractWithVisionLLM(byte[] pdfBytes) {
-        log.info("Starting Vision LLM parsing for scanned PDF...");
-        List<ParsedTransaction> allTransactions = new ArrayList<>();
-        
-        try (PDDocument pdf = Loader.loadPDF(pdfBytes)) {
-            PDFRenderer renderer = new PDFRenderer(pdf);
-            
-            // Process all pages in the PDF
-            int maxPages = pdf.getNumberOfPages();
-            log.info("Rendering {} pages to images for Vision API...", maxPages);
-            
-            for (int i = 0; i < maxPages; i++) {
-                BufferedImage image = renderer.renderImageWithDPI(i, 150, ImageType.RGB);
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                ImageIO.write(image, "png", baos);
-                byte[] imageBytes = baos.toByteArray();
-                
-                boolean success = false;
-                int attempts = 0;
-                while (!success && attempts < 3) {
-                    attempts++;
-                    try {
-                        log.info("Sending page {}/{} to Vision LLM (Attempt {})...", i + 1, maxPages, attempts);
-                        List<ParsedTransaction> chunkResult = chat.prompt()
-                                .system(PARSER_SYSTEM_PROMPT)
-                                .user(u -> u.text("Parse this bank statement page image. Extract every complete transaction you can see. If the row is cut off, ignore it.")
-                                            .media(MimeTypeUtils.IMAGE_PNG, new org.springframework.core.io.ByteArrayResource(imageBytes)))
-                                .call()
-                                .entity(new ParameterizedTypeReference<List<ParsedTransaction>>() {});
-                                
-                        if (chunkResult != null) {
-                            allTransactions.addAll(chunkResult);
-                        }
-                        log.info("Vision LLM returned {} transactions for page {}", 
-                                chunkResult == null ? 0 : chunkResult.size(), i + 1);
-                        success = true;
-                    } catch (Exception e) {
-                        log.error("Vision LLM failed to parse page {} (Attempt {})", i + 1, attempts, e);
-                        if (attempts < 3) {
-                            log.info("Waiting 15 seconds before retrying...");
-                            try {
-                                Thread.sleep(15000);
-                            } catch (InterruptedException ie) {
-                                Thread.currentThread().interrupt();
-                                break;
-                            }
-                        }
-                    }
-                }
-                
-                // Add a delay between successful pages to prevent rate limiting (429) on free tier APIs
-                if (success && i < maxPages - 1) {
-                    try {
-                        log.info("Sleeping 10 seconds to respect free API rate limits...");
-                        Thread.sleep(10000);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
-            }
-        } catch (IOException e) {
-            log.error("Failed to render PDF to images", e);
-        }
-        
-        List<ParsedTransaction> deduped = deduplicate(allTransactions);
-        if (deduped.size() != allTransactions.size()) {
-            log.info("Removed {} duplicate transactions from image overlaps", allTransactions.size() - deduped.size());
-        }
-        return deduped;
     }
 
     // ==================== BANK NAME DETECTION ====================

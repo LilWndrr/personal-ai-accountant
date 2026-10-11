@@ -1,6 +1,7 @@
 package com.example.springaitest.api.config.domain;
 
 import jakarta.persistence.*;
+import jakarta.validation.constraints.Size;
 import lombok.*;
 
 @Entity
@@ -15,6 +16,7 @@ public class Category {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
     @Column(nullable = false)
+    @Size(min=2,max=20, message = "Category name should be in range 2 to 10")
     private String name;
     private String emoji;
     @Column(name = "telegram_user_id", nullable = false)

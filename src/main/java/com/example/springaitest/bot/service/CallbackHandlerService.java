@@ -64,7 +64,7 @@ public class CallbackHandlerService {
                   .orElse(null);
           // 3. Save to database
           Transaction entity = Transaction.builder()
-                  .date(LocalDate.parse(original.date(), DateTimeFormatter.ofPattern("dd.MM.yyyy")))
+                  .date(LocalDate.parse(original.date(), DateTimeFormatter.ofPattern("dd[.][/][-]MM[.][/][-]yyyy")))
                   .balance(BigDecimal.valueOf(original.balance()))
                   .amount(BigDecimal.valueOf(original.amount()))
                   .type(original.amount() < 0 ? TransactionType.EXPENSE : TransactionType.INCOME)
@@ -89,7 +89,7 @@ public class CallbackHandlerService {
           Category category =  categoryRepository.findByNameAndTelegramUserId("Diğer", 0L).orElse(null);
 
           Transaction entity = Transaction.builder()
-                  .date(LocalDate.parse(original.date(), DateTimeFormatter.ofPattern("dd.MM.yyyy")))
+                  .date(LocalDate.parse(original.date(), DateTimeFormatter.ofPattern("dd[.][/][-]MM[.][/][-]yyyy")))
                   .balance(BigDecimal.valueOf(original.balance()))
                   .amount(BigDecimal.valueOf(original.amount()))
                   .type(original.amount() < 0 ? TransactionType.EXPENSE : TransactionType.INCOME)

@@ -97,8 +97,8 @@ public class CategorizationService {
         if (!needsAiIndices.isEmpty()) {
             List<String> allCategoryNames = getAllCategoryNames(userId);
 
-            // Process sequentially in batches of 5 to prevent thread deadlocks and API rate limits
-            int batchSize = 5;
+            // Process sequentially in batches of 25 to optimize latency and throughput
+            int batchSize = 25;
             List<CategorizedTransaction> allAiResults = new ArrayList<>();
 
             for (int batchStart = 0; batchStart < needsAiIndices.size(); batchStart += batchSize) {
@@ -175,9 +175,10 @@ public class CategorizationService {
 
         String responseText = "";
         try {
-            // Override the model to use the categorization-specific model
+            // Override the model to use the categorization-specific model with low temperature for deterministic JSON
             OpenAiChatOptions modelOverride = OpenAiChatOptions.builder()
                     .model(categorizationModel)
+                    .temperature(0.1)
                     .build();
 
             org.springframework.ai.chat.prompt.Prompt prompt = new org.springframework.ai.chat.prompt.Prompt(
@@ -197,10 +198,11 @@ public class CategorizationService {
             mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
             mapper.findAndRegisterModules(); // Needed for Java Records
             
-            // Extract the JSON array using regex to handle conversational text
-            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\[.*\\]", java.util.regex.Pattern.DOTALL).matcher(responseText);
-            if (matcher.find()) {
-                responseText = matcher.group();
+            // Extract the JSON array cleanly between outermost brackets to avoid greedy hallucination matching
+            int jsonStart = responseText.indexOf('[');
+            int jsonEnd = responseText.lastIndexOf(']');
+            if (jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart) {
+                responseText = responseText.substring(jsonStart, jsonEnd + 1);
             } else {
                 throw new RuntimeException("No JSON array found in response");
             }
