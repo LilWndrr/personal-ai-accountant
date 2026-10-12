@@ -178,7 +178,7 @@ public class CategorizationService {
             // Override the model to use the categorization-specific model with low temperature for deterministic JSON
             OpenAiChatOptions modelOverride = OpenAiChatOptions.builder()
                     .model(categorizationModel)
-                    .temperature(0.1)
+                    .temperature(0.3)
                     .build();
 
             org.springframework.ai.chat.prompt.Prompt prompt = new org.springframework.ai.chat.prompt.Prompt(

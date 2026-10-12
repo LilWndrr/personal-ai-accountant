@@ -3,17 +3,17 @@ package com.example.springaitest.api.config.service;
 import com.example.springaitest.api.config.dto.ParsedResult;
 import com.example.springaitest.api.config.dto.ParsedTransaction;
 import com.example.springaitest.api.config.dto.ValidationResult;
+import lombok.RequiredArgsConstructor;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.ImageType;
 import org.apache.pdfbox.rendering.PDFRenderer;
-import org.apache.pdfbox.text.PDFTextStripper;
+
 import org.apache.poi.ss.usermodel.*;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.core.ParameterizedTypeReference;
-import com.fasterxml.jackson.core.type.TypeReference;
+
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -27,9 +27,13 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
-import java.util.stream.Collectors;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import org.springframework.core.io.ByteArrayResource;
+
 
 @Slf4j
 @Service
@@ -41,8 +45,11 @@ public class DocumentParserService {
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
             .findAndRegisterModules();
 
-    public DocumentParserService(@Qualifier("financeChatClient") ChatClient chat) {
+    private final Executor parserExecutor;
+
+    public DocumentParserService(@Qualifier("financeChatClient") ChatClient chat, @Qualifier("documentParserExecutor") Executor executor) {
         this.chat = chat;
+        this.parserExecutor=executor;
     }
 
     private static final String PARSER_SYSTEM_PROMPT = """
@@ -215,7 +222,7 @@ public class DocumentParserService {
     private List<ParsedTransaction> parseCsvDirectly(InputStream document) {
         List<ParsedTransaction> transactions = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(document, StandardCharsets.UTF_8))) {
-            List<String> lines = reader.lines().collect(Collectors.toList());
+            List<String> lines = reader.lines().toList();
             if (lines.isEmpty()) return transactions;
 
             // Detect delimiter (comma, semicolon, or tab)
@@ -317,80 +324,99 @@ public class DocumentParserService {
         };
     }
 
-    // ==================== VISION LLM PARSER (PDF) ====================
+    // ==================== VISION LLM PARSER (CONCURRENT PDF) ====================
+
+    private record PageImage(int pageIndex, byte[] bytes) {}
+    private record PageResult(int pageIndex, List<ParsedTransaction> transactions) {}
 
     private List<ParsedTransaction> extractWithVisionLLM(PDDocument pdf, int maxPages) {
         log.info("Starting Vision LLM parsing for {} page(s)...", maxPages);
-        List<ParsedTransaction> allTransactions = new ArrayList<>();
         PDFRenderer renderer = new PDFRenderer(pdf);
 
+        // 1. Render all pages sequentially on current thread (PDFBox is not thread-safe)
+        List<PageImage> pageImages = new ArrayList<>();
         for (int i = 0; i < maxPages; i++) {
-            byte[] imageBytes;
             try {
                 BufferedImage image = renderer.renderImageWithDPI(i, 150, ImageType.RGB);
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 ImageIO.write(image, "png", baos);
-                imageBytes = baos.toByteArray();
+                pageImages.add(new PageImage(i + 1, baos.toByteArray()));
             } catch (IOException e) {
                 log.error("Failed to render page {} to image", i + 1, e);
-                continue;
-            }
-
-            boolean success = false;
-            int attempts = 0;
-            while (!success && attempts < 3) {
-                attempts++;
-                try {
-                    log.info("Sending page {}/{} to Vision LLM (Attempt {})...", i + 1, maxPages, attempts);
-                    String rawResponse = chat.prompt()
-                            .system(PARSER_SYSTEM_PROMPT)
-                            .options(OpenAiChatOptions.builder()
-                                    .temperature(0.1))
-                            .user(u -> u.text("Extract all transactions from this bank statement page image into a JSON array. Return ONLY the JSON array starting with [ and ending with ].")
-                                        .media(MimeTypeUtils.IMAGE_PNG, new org.springframework.core.io.ByteArrayResource(imageBytes)))
-                            .call()
-                            .content();
-
-                    log.info("Page {} Vision Raw Response:\n{}", i + 1, rawResponse);
-
-                    List<ParsedTransaction> chunkResult = parseJsonArray(rawResponse);
-
-                    if (chunkResult != null && !chunkResult.isEmpty()) {
-                        allTransactions.addAll(chunkResult);
-                    }
-                    log.info("Vision LLM returned {} transactions for page {}", 
-                            chunkResult == null ? 0 : chunkResult.size(), i + 1);
-                    success = true;
-                } catch (Exception e) {
-                    log.error("Vision LLM failed to parse page {} (Attempt {})", i + 1, attempts, e);
-                    if (attempts < 3) {
-                        log.info("Waiting 5 seconds before retrying...");
-                        try {
-                            Thread.sleep(5000);
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Respect rate limits between pages
-            if (success && i < maxPages - 1) {
-                try {
-                    log.info("Sleeping 3 seconds between pages to respect API limits...");
-                    Thread.sleep(3000);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
             }
         }
 
+        if (pageImages.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        // 2. Dispatch LLM calls concurrently on the injected parserExecutor
+        List<CompletableFuture<PageResult>> futures = pageImages.stream()
+                .map(page -> CompletableFuture.supplyAsync(
+                        () -> processPageWithRetry(page, maxPages),
+                        this.parserExecutor
+                ))
+                .toList();
+
+        // 3. Wait for all concurrent tasks to finish
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+        // 4. Collect results and sort strictly by pageIndex to preserve statement chronology
+        List<ParsedTransaction> allTransactions = futures.stream()
+                .map(CompletableFuture::join)
+                .sorted(Comparator.comparingInt(PageResult::pageIndex))
+                .flatMap(res -> res.transactions().stream())
+                .toList();
+
+        // 5. Deduplicate overlapping transactions across pages
         List<ParsedTransaction> deduped = deduplicate(allTransactions);
         if (deduped.size() != allTransactions.size()) {
             log.info("Removed {} duplicate transactions from image overlaps", allTransactions.size() - deduped.size());
         }
         return deduped;
+    }
+
+    /**
+     * Isolated worker for an individual page with retry backoff.
+     */
+    private PageResult processPageWithRetry(PageImage page, int totalPages) {
+        int attempts = 0;
+        while (attempts < 3) {
+            attempts++;
+            try {
+                log.info("Sending page {}/{} to Vision LLM (Attempt {})...", page.pageIndex(), totalPages, attempts);
+
+                String rawResponse = chat.prompt()
+                        .system(PARSER_SYSTEM_PROMPT)
+                        .options(OpenAiChatOptions.builder().temperature(0.1))
+                        .user(u -> u.text("Extract all transactions from this bank statement page image into a JSON array. Return ONLY the JSON array starting with [ and ending with ].")
+                                    .media(MimeTypeUtils.IMAGE_PNG, new ByteArrayResource(page.bytes())))
+                        .call()
+                        .content();
+
+                log.info("Page {} Vision Raw Response:\n{}", page.pageIndex(), rawResponse);
+
+                List<ParsedTransaction> chunkResult = parseJsonArray(rawResponse);
+                log.info("Vision LLM returned {} transactions for page {}", 
+                         chunkResult == null ? 0 : chunkResult.size(), page.pageIndex());
+
+                return new PageResult(page.pageIndex(), chunkResult != null ? chunkResult : Collections.emptyList());
+
+            } catch (Exception e) {
+                log.error("Vision LLM failed for page {} (Attempt {})", page.pageIndex(), attempts, e);
+                if (attempts < 3) {
+                    try {
+                        Thread.sleep(2000L * attempts); // Backoff: 2s, 4s
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+        }
+
+        log.error("All retry attempts failed for page {}", page.pageIndex());
+        return new PageResult(page.pageIndex(), Collections.emptyList());
     }
 
     private List<ParsedTransaction> parseJsonArray(String rawResponse) {
