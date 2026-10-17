@@ -1,11 +1,9 @@
 package com.example.springaitest.bot.commands;
 
 import com.example.springaitest.bot.events.MessageEvent;
-import com.example.springaitest.bot.model.UserSessionService;
-import com.example.springaitest.bot.model.UserState;
+import com.example.springaitest.bot.service.UserSessionService;
 import com.example.springaitest.bot.service.KeyboardService;
 import lombok.RequiredArgsConstructor;
-import org.springframework.context.ApplicationEvent;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;

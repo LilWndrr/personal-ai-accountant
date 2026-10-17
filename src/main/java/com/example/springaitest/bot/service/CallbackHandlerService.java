@@ -12,11 +12,8 @@ import com.example.springaitest.api.config.dto.CategorizedTransaction;
 import com.example.springaitest.api.config.dto.ParsedTransaction;
 import com.example.springaitest.bot.events.MessageEvent;
 import com.example.springaitest.bot.model.UserSession;
-import com.example.springaitest.bot.model.UserSessionService;
 import com.example.springaitest.bot.model.UserState;
-import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
-import org.apache.catalina.User;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
@@ -50,6 +47,7 @@ public class CallbackHandlerService {
 
       if(parts[0].equals("new")){
           session.setUserState(UserState.CREATING_CATEGORY);
+          sessionService.saveSession(session);
           eventPublisher.publishEvent(new MessageEvent(this, SendMessage
                   .builder()
                   .chatId(chatId)
@@ -116,6 +114,7 @@ public class CallbackHandlerService {
                     .chatId(chatId).text("🎉 All done! Review complete.").build()));
         }
 
+        sessionService.saveSession(session);
     }
 
     private SendMessage buildReviewMessage(Long chatId, UserSession session) {
@@ -123,11 +122,11 @@ public class CallbackHandlerService {
         ParsedTransaction original = session.getOriginalTransactions().get(review.transactionIndex());
         String text = String.format("""
             📍 Transaction %d/%d
-            
+
             📅 Date: %s
             📝 %s
             💰 Amount: %.2f
-            
+
             🤖 AI suggests: %s
             """,
                 session.getCurrentReviewIndex() + 1,

@@ -1,14 +1,9 @@
 package com.example.springaitest.bot;
 
-import com.example.springaitest.bot.commands.Command;
-import com.example.springaitest.bot.commands.CommandHandler;
 import com.example.springaitest.bot.model.UserSession;
-import com.example.springaitest.bot.model.UserSessionService;
+import com.example.springaitest.bot.service.UserSessionService;
 import com.example.springaitest.bot.model.UserState;
-import com.example.springaitest.bot.service.CallbackHandlerService;
-import com.example.springaitest.bot.service.CustomCategoryService;
-import com.example.springaitest.bot.service.ReportService;
-import com.example.springaitest.bot.service.UploadWorkFlowService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.longpolling.util.LongPollingSingleThreadUpdateConsumer;
 import org.telegram.telegrambots.meta.api.objects.Update;
@@ -18,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Component
 public class MainBot implements LongPollingSingleThreadUpdateConsumer {
 
@@ -32,7 +28,7 @@ public class MainBot implements LongPollingSingleThreadUpdateConsumer {
 
     @Override
     public void consume(Update update) {
-
+        try{
         Long chatId = null;
         if (update.hasMessage()) {
             chatId = update.getMessage().getChatId();
@@ -43,10 +39,13 @@ public class MainBot implements LongPollingSingleThreadUpdateConsumer {
         if (chatId == null) return;
 
         UserSession session = userSessionService.getSession(chatId);
-        
+
         StateHandler handler = stateHandlers.get(session.getUserState());
         if (handler != null) {
             handler.handle(update, chatId);
+        }
+        } catch (Exception e) {
+            log.error("Failed to handle Telegram update", e);
         }
     }
 }

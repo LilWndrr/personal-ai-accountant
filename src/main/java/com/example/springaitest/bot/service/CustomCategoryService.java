@@ -13,7 +13,6 @@ import com.example.springaitest.api.config.dto.CategorizedTransaction;
 import com.example.springaitest.api.config.dto.ParsedTransaction;
 import com.example.springaitest.bot.events.MessageEvent;
 import com.example.springaitest.bot.model.UserSession;
-import com.example.springaitest.bot.model.UserSessionService;
 import com.example.springaitest.bot.model.UserState;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.ApplicationEventPublisher;
@@ -86,6 +85,8 @@ public class CustomCategoryService {
             eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
                     .chatId(chatId).text("🎉 All done! Review complete.").build()));
         }
+
+        userSessionService.saveSession(session);
     }
     private SendMessage buildReviewMessage(Long chatId, UserSession session) {
         CategorizedTransaction review = session.getPendingReview().get(session.getCurrentReviewIndex());
