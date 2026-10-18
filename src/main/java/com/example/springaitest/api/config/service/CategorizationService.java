@@ -9,6 +9,7 @@ import com.example.springaitest.api.config.domain.MerchantMapping;
 import com.example.springaitest.api.config.dto.CategorizationResult;
 import com.example.springaitest.api.config.dto.CategorizedTransaction;
 import com.example.springaitest.api.config.dto.ParsedTransaction;
+import io.github.resilience4j.ratelimiter.RateLimiter;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
@@ -16,21 +17,23 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Service;
-
-import org.springframework.transaction.annotation.Transactional;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.concurrent.Callable;
 import java.util.stream.Stream;
 
 @Service
+@Slf4j
 public class CategorizationService {
 
     private final ChatModel chatModel;
     private final MerchantMappingRepository merchantMappingRepository;
     private final CategoryRepository categoryRepository;
+    private final RateLimiter llmRateLimiter;
 
     @Value("${app.categorization.model}")
     private String categorizationModel;
@@ -38,10 +41,12 @@ public class CategorizationService {
     public CategorizationService(
             ChatModel chatModel,
             MerchantMappingRepository merchantMappingRepository,
-            CategoryRepository categoryRepository) {
+            CategoryRepository categoryRepository,
+            RateLimiter llmRateLimiter) {
         this.chatModel = chatModel;
         this.merchantMappingRepository = merchantMappingRepository;
         this.categoryRepository = categoryRepository;
+        this.llmRateLimiter = llmRateLimiter;
     }
 
     private static final String CATEGORIZATION_SYSTEM_PROMPT = """
@@ -63,7 +68,6 @@ public class CategorizationService {
     private double confidenceThreshold;
 
 
-    @Transactional(readOnly = true)
     public CategorizationResult categorize(List<ParsedTransaction> transactions, Long userId) {
 
         List<CategorizedTransaction> autoCategorized = new ArrayList<>();
@@ -112,7 +116,7 @@ public class CategorizationService {
                     List<CategorizedTransaction> batchResults = callLLMforCategorization(batchTransactions, batchIndices, allCategoryNames);
                     allAiResults.addAll(batchResults);
                 } catch (Exception e) {
-                    System.err.println("LLM Categorization failed for batch: " + e.getMessage());
+                    log.warn("LLM categorization failed for batch: {}", e.getMessage());
                     // Fallback: Send this batch to manual review if AI fails
                     for (int i = 0; i < batchTransactions.size(); i++) {
                         ParsedTransaction tx = batchTransactions.get(i);
@@ -189,10 +193,10 @@ public class CategorizationService {
                     modelOverride
             );
 
-            responseText = chatModel.call(prompt).getResult().getOutput().getText();
-            System.out.println("========== AI RESPONSE SUCCESS ==========");
-            System.out.println(responseText);
-            System.out.println("=========================================");
+            Callable<String> rateLimitedCall = RateLimiter.decorateCallable(llmRateLimiter,
+                    () -> chatModel.call(prompt).getResult().getOutput().getText());
+            responseText = rateLimitedCall.call();
+            log.debug("AI response: {}", responseText);
 
             com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
             mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
@@ -212,15 +216,11 @@ public class CategorizationService {
             responseText = responseText.replaceAll("},\\s*\"(\\w+)\"\\s*:", "},{\"$1\":");
             
             List<CategorizedTransaction> parsedList = mapper.readValue(responseText, new com.fasterxml.jackson.core.type.TypeReference<List<CategorizedTransaction>>() {});
-            System.out.println("Parsed " + parsedList.size() + " transactions from AI JSON.");
+            log.debug("Parsed {} transactions from AI JSON.", parsedList.size());
             return parsedList;
         } catch (Exception e) {
-            System.err.println("============= AI PARSING FAILED =============");
-            System.err.println("Error: " + e.getMessage());
-            System.err.println("Raw Response Text: \n" + responseText);
-            e.printStackTrace();
-            System.err.println("=============================================");
-            
+            log.error("AI parsing failed: {}\nRaw response: {}", e.getMessage(), responseText, e);
+
             try {
                 java.nio.file.Files.writeString(
                     java.nio.file.Paths.get("ai-response-debug.txt"), 

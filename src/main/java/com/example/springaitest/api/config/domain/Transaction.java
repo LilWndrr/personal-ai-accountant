@@ -13,7 +13,7 @@ import java.time.LocalDateTime;
 @Getter
 @Setter
 @Builder
-@Table(name = "transactions")
+@Table(name = "transactions", indexes = @Index(name = "idx_transaction_user_date", columnList = "telegram_user_id, date"))
 public class Transaction {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

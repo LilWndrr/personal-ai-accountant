@@ -18,4 +18,17 @@ public class ExecutorConfig {
         executor.setThreadGroupName("doc-parser-");
         executor.initialize();
         return executor;
-    }}
+    }
+
+    @Bean(name = "taskExecutor")
+    public Executor taskExecutor(){
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(30);
+        executor.setKeepAliveSeconds(90);
+        executor.setThreadNamePrefix("upload-async-");
+        executor.initialize();
+        return executor;
+    }
+}

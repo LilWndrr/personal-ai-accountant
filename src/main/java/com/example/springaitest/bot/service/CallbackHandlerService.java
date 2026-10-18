@@ -120,13 +120,16 @@ public class CallbackHandlerService {
     private SendMessage buildReviewMessage(Long chatId, UserSession session) {
         CategorizedTransaction review = session.getPendingReview().get(session.getCurrentReviewIndex());
         ParsedTransaction original = session.getOriginalTransactions().get(review.transactionIndex());
+        String warning = review.reasoning() != null && review.reasoning().startsWith("⚠️")
+                ? "\n" + review.reasoning() + "\n"
+                : "";
         String text = String.format("""
             📍 Transaction %d/%d
 
             📅 Date: %s
             📝 %s
             💰 Amount: %.2f
-
+            %s
             🤖 AI suggests: %s
             """,
                 session.getCurrentReviewIndex() + 1,
@@ -134,6 +137,7 @@ public class CallbackHandlerService {
                 original.date(),
                 original.description(),
                 original.amount(),
+                warning,
                 review.suggestedCategory()
         );
 

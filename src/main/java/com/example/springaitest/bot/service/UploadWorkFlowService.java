@@ -129,6 +129,13 @@ public class UploadWorkFlowService {
             String bankName = parsedResult.bankName();
             List<ParsedTransaction> parsedTransactions = parsedResult.transactions();
 
+            // Captured before dedup filtering (which re-indexes the list) so we can
+            // still tell which surviving transactions were flagged, by identity rather than index.
+            java.util.Set<ParsedTransaction> flaggedForBalanceMismatch = new java.util.HashSet<>();
+            for (int invalidIndex : parsedResult.validation().invalidIndices()) {
+                flaggedForBalanceMismatch.add(parsedTransactions.get(invalidIndex));
+            }
+
             // Filter out duplicate transactions that already exist in the database
             int totalParsed = parsedTransactions.size();
             parsedTransactions = deduplicationService.filterDuplicates(parsedTransactions, bankName, chatId);
@@ -157,20 +164,26 @@ public class UploadWorkFlowService {
 
             String batchId = UUID.randomUUID().toString();
             List<Transaction> entitiesToSave = new ArrayList<>();
+            List<CategorizedTransaction> needsReview = new ArrayList<>(categorizationResult.needsReview());
 
             for (CategorizedTransaction ct : categorizationResult.autoCategorized()) {
 
                 ParsedTransaction original = parsedTransactions.get(ct.transactionIndex());
-                Category category = categoryRepository.findByNameAndTelegramUserId(ct.suggestedCategory(), chatId)
-                        .or(() -> categoryRepository.findByNameAndTelegramUserId(ct.suggestedCategory(), 0L))
-                        .orElseGet(() -> categoryRepository.save(
-                                Category.builder()
-                                        .name(ct.suggestedCategory())
-                                        .emoji(ct.suggestedEmoji())
-                                        .custom(true)
-                                        .telegramUserId(chatId)
-                                        .build()
-                        ));
+
+                if (flaggedForBalanceMismatch.contains(original)) {
+                    needsReview.add(new CategorizedTransaction(
+                            ct.transactionIndex(),
+                            ct.suggestedCategory(),
+                            ct.suggestedEmoji(),
+                            ct.confidence(),
+                            ct.merchantName(),
+                            "⚠️ Balance mismatch detected — please double-check this amount. " + ct.reasoning()
+                    ));
+                    continue;
+                }
+
+                Category category = categoryRepository.findOrCreateCategory(
+                        ct.suggestedCategory(), chatId, ct.suggestedEmoji(), true);
                 Transaction entity = Transaction.builder()
                         .date(LocalDate.parse(original.date(), DateTimeFormatter.ofPattern("dd[.][/][-]MM[.][/][-]yyyy")))
                         .balance(BigDecimal.valueOf(original.balance()))
@@ -188,9 +201,9 @@ public class UploadWorkFlowService {
 
             }
             transactionRepository.saveAll(entitiesToSave);
-            if (categorizationResult.needsReview() != null && !categorizationResult.needsReview().isEmpty()) {
+            if (!needsReview.isEmpty()) {
 
-                session.setPendingReview(categorizationResult.needsReview());
+                session.setPendingReview(needsReview);
                 session.setUserState(UserState.REVIEWING);
                 session.setOriginalTransactions(parsedTransactions);
                 session.setCurrentReviewIndex(0);
@@ -215,13 +228,16 @@ public class UploadWorkFlowService {
         private SendMessage buildReviewMessage(Long chatId, UserSession session) {
             CategorizedTransaction review = session.getPendingReview().get(session.getCurrentReviewIndex());
             ParsedTransaction original = session.getOriginalTransactions().get(review.transactionIndex());
+            String warning = review.reasoning() != null && review.reasoning().startsWith("⚠️")
+                    ? "\n" + review.reasoning() + "\n"
+                    : "";
             String text = String.format("""
             📍 Transaction %d/%d
-            
+
             📅 Date: %s
             📝 %s
             💰 Amount: %.2f
-            
+            %s
             🤖 AI suggests: %s
             """,
                     session.getCurrentReviewIndex() + 1,
@@ -229,6 +245,7 @@ public class UploadWorkFlowService {
                     original.date(),
                     original.description(),
                     original.amount(),
+                    warning,
                     review.suggestedCategory()
             );
             // Build Keyboard buttons

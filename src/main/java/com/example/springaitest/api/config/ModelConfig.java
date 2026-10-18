@@ -1,13 +1,32 @@
 package com.example.springaitest.api.config;
 
+import io.github.resilience4j.ratelimiter.RateLimiter;
+import io.github.resilience4j.ratelimiter.RateLimiterConfig;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.time.Duration;
+
 @Configuration
 public class ModelConfig {
 
-
+    /**
+     * Shared across every call site that hits the LLM provider (vision parsing
+     * and categorization both use the same API key/account), since the limit
+     * is enforced by the provider per-account, not per-feature.
+     * Capped below the provider's published 40 rpm limit to leave headroom for
+     * clock-skew between our refresh window and theirs.
+     */
+    @Bean
+    public RateLimiter llmRateLimiter() {
+        RateLimiterConfig config = RateLimiterConfig.custom()
+                .limitForPeriod(35)
+                .limitRefreshPeriod(Duration.ofMinutes(1))
+                .timeoutDuration(Duration.ofSeconds(30))
+                .build();
+        return RateLimiter.of("llmRateLimiter", config);
+    }
 
     @Bean("financeChatClient")
     ChatClient financeChatClient(ChatClient.Builder builder) {

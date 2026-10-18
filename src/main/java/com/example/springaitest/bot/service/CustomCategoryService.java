@@ -40,14 +40,7 @@ public class CustomCategoryService {
     public void handleCategoryCreating(Long chatId, String categoryName) {
         UserSession session = userSessionService.getSession(chatId);
 
-        Category category = categoryRepository.findByNameAndTelegramUserId(categoryName, 0L).orElse(null);
-        if(category==null){
-
-            category = categoryRepository.findByNameAndTelegramUserId(categoryName, chatId)
-                    .orElseGet(() -> categoryRepository.save(
-                            Category.builder().name(categoryName).custom(true).telegramUserId(chatId).build()
-                    ));
-        }
+        Category category = categoryRepository.findOrCreateCategory(categoryName, chatId, null, true);
 
 
 
@@ -91,13 +84,16 @@ public class CustomCategoryService {
     private SendMessage buildReviewMessage(Long chatId, UserSession session) {
         CategorizedTransaction review = session.getPendingReview().get(session.getCurrentReviewIndex());
         ParsedTransaction original = session.getOriginalTransactions().get(review.transactionIndex());
+        String warning = review.reasoning() != null && review.reasoning().startsWith("⚠️")
+                ? "\n" + review.reasoning() + "\n"
+                : "";
         String text = String.format("""
             📍 Transaction %d/%d
-            
+
             📅 Date: %s
             📝 %s
             💰 Amount: %.2f
-            
+            %s
             🤖 AI suggests: %s
             """,
                 session.getCurrentReviewIndex() + 1,
@@ -105,6 +101,7 @@ public class CustomCategoryService {
                 original.date(),
                 original.description(),
                 original.amount(),
+                warning,
                 review.suggestedCategory()
         );
 

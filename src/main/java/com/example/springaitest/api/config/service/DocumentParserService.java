@@ -3,6 +3,7 @@ package com.example.springaitest.api.config.service;
 import com.example.springaitest.api.config.dto.ParsedResult;
 import com.example.springaitest.api.config.dto.ParsedTransaction;
 import com.example.springaitest.api.config.dto.ValidationResult;
+import io.github.resilience4j.ratelimiter.RateLimiter;
 import lombok.RequiredArgsConstructor;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -46,10 +47,14 @@ public class DocumentParserService {
             .findAndRegisterModules();
 
     private final Executor parserExecutor;
+    private final RateLimiter llmRateLimiter;
 
-    public DocumentParserService(@Qualifier("financeChatClient") ChatClient chat, @Qualifier("documentParserExecutor") Executor executor) {
+    public DocumentParserService(@Qualifier("financeChatClient") ChatClient chat,
+                                  @Qualifier("documentParserExecutor") Executor executor,
+                                  RateLimiter llmRateLimiter) {
         this.chat = chat;
         this.parserExecutor=executor;
+        this.llmRateLimiter = llmRateLimiter;
     }
 
     private static final String PARSER_SYSTEM_PROMPT = """
@@ -386,13 +391,13 @@ public class DocumentParserService {
             try {
                 log.info("Sending page {}/{} to Vision LLM (Attempt {})...", page.pageIndex(), totalPages, attempts);
 
-                String rawResponse = chat.prompt()
+                String rawResponse = RateLimiter.decorateCallable(llmRateLimiter, () -> chat.prompt()
                         .system(PARSER_SYSTEM_PROMPT)
                         .options(OpenAiChatOptions.builder().temperature(0.1))
                         .user(u -> u.text("Extract all transactions from this bank statement page image into a JSON array. Return ONLY the JSON array starting with [ and ending with ].")
                                     .media(MimeTypeUtils.IMAGE_PNG, new ByteArrayResource(page.bytes())))
                         .call()
-                        .content();
+                        .content()).call();
 
                 log.info("Page {} Vision Raw Response:\n{}", page.pageIndex(), rawResponse);
 
