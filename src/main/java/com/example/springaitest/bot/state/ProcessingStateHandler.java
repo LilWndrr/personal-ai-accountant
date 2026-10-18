@@ -3,6 +3,7 @@ package com.example.springaitest.bot.state;
 import com.example.springaitest.bot.commands.CommandHandler;
 import com.example.springaitest.bot.model.UserState;
 import com.example.springaitest.bot.service.ReportService;
+import com.example.springaitest.bot.service.TransactionListService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.meta.api.objects.Update;
@@ -12,6 +13,7 @@ import org.telegram.telegrambots.meta.api.objects.Update;
 public class ProcessingStateHandler implements StateHandler {
     private final CommandHandler commandHandler;
     private final ReportService reportService;
+    private final TransactionListService transactionListService;
 
     @Override
     public UserState getSupportedState() { return UserState.PROCESSING; }
@@ -24,6 +26,10 @@ public class ProcessingStateHandler implements StateHandler {
             String callbackData = update.getCallbackQuery().getData();
             if (callbackData.startsWith("report:")) {
                 reportService.handleReportCallback(chatId, callbackData);
+            } else if (callbackData.startsWith("transactions:")) {
+                transactionListService.handleTransactionsCallback(chatId, callbackData);
+            } else if (callbackData.startsWith("txlist:")) {
+                transactionListService.handlePageCallback(chatId, callbackData);
             }
         }
     }

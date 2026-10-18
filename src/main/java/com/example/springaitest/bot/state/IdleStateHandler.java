@@ -3,6 +3,7 @@ package com.example.springaitest.bot.state;
 import com.example.springaitest.bot.commands.CommandHandler;
 import com.example.springaitest.bot.model.UserState;
 import com.example.springaitest.bot.service.ReportService;
+import com.example.springaitest.bot.service.TransactionListService;
 import com.example.springaitest.bot.service.UploadWorkFlowService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -14,6 +15,7 @@ public class IdleStateHandler implements StateHandler {
     private final UploadWorkFlowService uploadWorkFlowService;
     private final CommandHandler commandHandler;
     private final ReportService reportService;
+    private final TransactionListService transactionListService;
 
     @Override
     public UserState getSupportedState() { return UserState.IDLE; }
@@ -28,6 +30,10 @@ public class IdleStateHandler implements StateHandler {
             String callbackData = update.getCallbackQuery().getData();
             if (callbackData.startsWith("report:")) {
                 reportService.handleReportCallback(chatId, callbackData);
+            } else if (callbackData.startsWith("transactions:")) {
+                transactionListService.handleTransactionsCallback(chatId, callbackData);
+            } else if (callbackData.startsWith("txlist:")) {
+                transactionListService.handlePageCallback(chatId, callbackData);
             }
         }
     }

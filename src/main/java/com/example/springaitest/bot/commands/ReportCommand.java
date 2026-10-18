@@ -49,6 +49,19 @@ public class ReportCommand implements Command {
             rows.add(new InlineKeyboardRow(button));
         }
 
+        rows.add(new InlineKeyboardRow(InlineKeyboardButton.builder()
+                .text("📈 This Year")
+                .callbackData("report:ytd")
+                .build()));
+        rows.add(new InlineKeyboardRow(InlineKeyboardButton.builder()
+                .text("📊 All Time")
+                .callbackData("report:all")
+                .build()));
+        rows.add(new InlineKeyboardRow(InlineKeyboardButton.builder()
+                .text("🗓 Custom Range")
+                .callbackData("report:custom")
+                .build()));
+
         InlineKeyboardMarkup keyboard = InlineKeyboardMarkup.builder()
                 .keyboard(rows)
                 .build();

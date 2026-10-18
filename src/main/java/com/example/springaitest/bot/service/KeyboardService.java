@@ -23,10 +23,9 @@ public class KeyboardService {
 
         keyboard.add(row1);
         // Second row
-       /* KeyboardRow row2 = new KeyboardRow();
-        row2.add();
-        row2.add();
-        keyboard.add(row2);*/
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add("Transactions");
+        keyboard.add(row2);
         // Keyboard settings
         ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup(keyboard);
         keyboardMarkup.setResizeKeyboard(true);
