@@ -19,7 +19,10 @@ import java.time.LocalDate;
 import java.time.Year;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
+import java.time.format.SignStyle;
+import java.time.temporal.ChronoField;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -30,7 +33,15 @@ public class TransactionListService {
 
     private static final int PAGE_SIZE = 15;
     private static final DateTimeFormatter DISPLAY_DATE_FORMAT = DateTimeFormatter.ofPattern("dd.MM.yyyy");
-    private static final DateTimeFormatter INPUT_DATE_FORMAT = DateTimeFormatter.ofPattern("dd.MM.yyyy");
+
+    /** Accepts both "1.7.2026" and "01.07.2026" - users don't reliably zero-pad when typing. */
+    private static final DateTimeFormatter INPUT_DATE_FORMAT = new DateTimeFormatterBuilder()
+            .appendValue(ChronoField.DAY_OF_MONTH, 1, 2, SignStyle.NOT_NEGATIVE)
+            .appendLiteral('.')
+            .appendValue(ChronoField.MONTH_OF_YEAR, 1, 2, SignStyle.NOT_NEGATIVE)
+            .appendLiteral('.')
+            .appendValue(ChronoField.YEAR, 4)
+            .toFormatter();
 
     private final TransactionRepository transactionRepository;
     private final ApplicationEventPublisher eventPublisher;

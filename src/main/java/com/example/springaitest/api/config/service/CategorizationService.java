@@ -101,8 +101,10 @@ public class CategorizationService {
         if (!needsAiIndices.isEmpty()) {
             List<String> allCategoryNames = getAllCategoryNames(userId);
 
-            // Process sequentially in batches of 25 to optimize latency and throughput
-            int batchSize = 25;
+            // Larger batch = fewer LLM calls (cheaper against OpenRouter's free-tier
+            // daily request cap); 75 keeps individual responses comfortably within
+            // maxTokens while cutting call count by ~3x versus the old batch of 25.
+            int batchSize = 75;
             List<CategorizedTransaction> allAiResults = new ArrayList<>();
 
             for (int batchStart = 0; batchStart < needsAiIndices.size(); batchStart += batchSize) {
@@ -183,6 +185,8 @@ public class CategorizationService {
             OpenAiChatOptions modelOverride = OpenAiChatOptions.builder()
                     .model(categorizationModel)
                     .temperature(0.3)
+                    .maxTokens(8192)
+                    .reasoningEffort("low")
                     .build();
 
             org.springframework.ai.chat.prompt.Prompt prompt = new org.springframework.ai.chat.prompt.Prompt(

@@ -15,32 +15,48 @@ import org.springframework.data.redis.serializer.StringRedisSerializer;
 // The correct Jackson 3 Imports!
 
 import tools.jackson.databind.DeserializationFeature;
-import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.SerializationFeature;
-import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
 
 @Configuration
 @EnableCaching
 public class CacheConfig {
 
-    @Bean
-    public ObjectMapper objectMapper() {
-
-        return JsonMapper.builder()
-                .enable(SerializationFeature.INDENT_OUTPUT)
-                .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+    /**
+     * GenericJacksonJsonRedisSerializer serializes/deserializes raw Object with
+     * no compile-time type info, so without default typing enabled it never
+     * embeds a type marker when writing - meaning on read, Jackson has no way
+     * to know the value should become a UserSession and falls back to a plain
+     * LinkedHashMap (ClassCastException at the call site). Scoped via the
+     * validator, not unrestricted, to avoid an arbitrary polymorphic-
+     * deserialization attack surface - but it must also cover the standard
+     * JDK collection types (ArrayList, HashMap, etc.) that back List/Map-typed
+     * fields like UserSession.pendingReview, since those interfaces are
+     * themselves polymorphic from Jackson's point of view and need a type
+     * marker of their own, not just the domain classes they contain.
+     */
+    private GenericJacksonJsonRedisSerializer buildSerializer() {
+        BasicPolymorphicTypeValidator typeValidator = BasicPolymorphicTypeValidator.builder()
+                .allowIfSubType("com.example.springaitest.")
+                .allowIfSubType("java.util.")
                 .build();
+
+        return GenericJacksonJsonRedisSerializer.create(builder -> builder
+                .enableDefaultTyping(typeValidator)
+                .customize(mapperBuilder -> mapperBuilder
+                        .enable(SerializationFeature.INDENT_OUTPUT)
+                        .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)));
     }
 
     @Bean(name = "UserSessionTemplate")
-    public RedisTemplate<String, UserSession> redisTemplate(RedisConnectionFactory connectionFactory, ObjectMapper objectMapper) {
+    public RedisTemplate<String, UserSession> redisTemplate(RedisConnectionFactory connectionFactory) {
         RedisTemplate<String, UserSession> template = new RedisTemplate<>();
         template.setConnectionFactory(connectionFactory);
 
         template.setKeySerializer(new StringRedisSerializer());
         template.setHashKeySerializer(new StringRedisSerializer());
 
-        GenericJacksonJsonRedisSerializer jsonSerializer = new GenericJacksonJsonRedisSerializer(objectMapper);
+        GenericJacksonJsonRedisSerializer jsonSerializer = buildSerializer();
         template.setValueSerializer(jsonSerializer);
         template.setHashValueSerializer(jsonSerializer);
 
@@ -48,9 +64,9 @@ public class CacheConfig {
     }
 
     @Bean
-    public RedisCacheManager cacheManager(RedisConnectionFactory connectionFactory, ObjectMapper objectMapper) {
+    public RedisCacheManager cacheManager(RedisConnectionFactory connectionFactory) {
 
-        GenericJacksonJsonRedisSerializer jsonSerializer = new GenericJacksonJsonRedisSerializer(objectMapper);
+        GenericJacksonJsonRedisSerializer jsonSerializer = buildSerializer();
 
         RedisCacheConfiguration config = RedisCacheConfiguration.defaultCacheConfig()
                 .serializeKeysWith(RedisSerializationContext.SerializationPair.fromSerializer(new StringRedisSerializer()))

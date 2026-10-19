@@ -17,8 +17,11 @@ import java.time.LocalDate;
 import java.time.Year;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
+import java.time.format.SignStyle;
 import java.time.format.TextStyle;
+import java.time.temporal.ChronoField;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -29,7 +32,16 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ReportService {
 
-    private static final DateTimeFormatter CUSTOM_RANGE_DATE_FORMAT = DateTimeFormatter.ofPattern("dd.MM.yyyy");
+    private static final DateTimeFormatter DISPLAY_DATE_FORMAT = DateTimeFormatter.ofPattern("dd.MM.yyyy");
+
+    /** Accepts both "1.7.2026" and "01.07.2026" - users don't reliably zero-pad when typing. */
+    private static final DateTimeFormatter INPUT_DATE_FORMAT = new DateTimeFormatterBuilder()
+            .appendValue(ChronoField.DAY_OF_MONTH, 1, 2, SignStyle.NOT_NEGATIVE)
+            .appendLiteral('.')
+            .appendValue(ChronoField.MONTH_OF_YEAR, 1, 2, SignStyle.NOT_NEGATIVE)
+            .appendLiteral('.')
+            .appendValue(ChronoField.YEAR, 4)
+            .toFormatter();
 
     private final TransactionRepository transactionRepository;
     private final ApplicationEventPublisher eventPublisher;
@@ -103,8 +115,8 @@ public class ReportService {
         }
 
         try {
-            startDate = LocalDate.parse(parts[0].trim(), CUSTOM_RANGE_DATE_FORMAT);
-            endDate = LocalDate.parse(parts[1].trim(), CUSTOM_RANGE_DATE_FORMAT);
+            startDate = LocalDate.parse(parts[0].trim(), INPUT_DATE_FORMAT);
+            endDate = LocalDate.parse(parts[1].trim(), INPUT_DATE_FORMAT);
         } catch (DateTimeParseException e) {
             sendCustomRangeFormatError(chatId);
             return;
@@ -122,7 +134,7 @@ public class ReportService {
         session.setUserState(UserState.IDLE);
         userSessionService.saveSession(session);
 
-        String rangeLabel = startDate.format(CUSTOM_RANGE_DATE_FORMAT) + " – " + endDate.format(CUSTOM_RANGE_DATE_FORMAT);
+        String rangeLabel = startDate.format(DISPLAY_DATE_FORMAT) + " – " + endDate.format(DISPLAY_DATE_FORMAT);
         buildAndSendReport(chatId, startDate, endDate, rangeLabel);
     }
 

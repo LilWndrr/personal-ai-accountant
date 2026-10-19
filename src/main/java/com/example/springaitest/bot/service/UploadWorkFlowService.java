@@ -119,11 +119,24 @@ public class UploadWorkFlowService {
             log.info("Finished parsing file: {}", telegramDoc.getFileName());
 
             if (parsedResult == null || parsedResult.transactions() == null || parsedResult.transactions().isEmpty()) {
+                String text = (parsedResult != null && parsedResult.failedPageCount() > 0)
+                        ? "❌ Failed to parse this file — " + parsedResult.failedPageCount() + " of " + parsedResult.totalPageCount()
+                                + " page(s) couldn't be read. Try re-uploading, or a different file."
+                        : "❌ I couldn't find any transactions in this file! Are you sure it's a valid bank statement?";
                 eventPublisher.publishEvent(new MessageEvent(this,
-                        SendMessage.builder().chatId(chatId).text("❌ I couldn't find any transactions in this file! Are you sure it's a valid bank statement?").build()
+                        SendMessage.builder().chatId(chatId).text(text).build()
                 ));
                 session.setUserState(UserState.IDLE);
                 return;
+            }
+
+            if (parsedResult.failedPageCount() > 0) {
+                eventPublisher.publishEvent(new MessageEvent(this,
+                        SendMessage.builder().chatId(chatId)
+                                .text("⚠️ " + parsedResult.failedPageCount() + " of " + parsedResult.totalPageCount()
+                                        + " page(s) failed to parse — you may be missing some transactions. Try re-uploading if the numbers look off.")
+                                .build()
+                ));
             }
 
             String bankName = parsedResult.bankName();

@@ -84,6 +84,8 @@ public class DocumentParserService {
         List<ParsedTransaction> transactions;
         String rawText;
         String bankName = detectBankFromFileName(fileName);
+        int failedPageCount = 0;
+        int totalPageCount = 0;
 
 
         byte[] fileBytes;
@@ -110,6 +112,7 @@ public class DocumentParserService {
             log.info("Processing PDF file with Vision LLM: {}", fileName);
             try (PDDocument pdf = Loader.loadPDF(fileBytes)) {
                 int pageCount = pdf.getNumberOfPages();
+                totalPageCount = pageCount;
                 log.info("PDF '{}' has {} page(s)", fileName, pageCount);
 
                 if (pageCount > MAX_PDF_PAGES) {
@@ -119,7 +122,9 @@ public class DocumentParserService {
                     );
                 }
 
-                transactions = extractWithVisionLLM(pdf, pageCount);
+                VisionExtractionResult visionResult = extractWithVisionLLM(pdf, pageCount);
+                transactions = visionResult.transactions();
+                failedPageCount = visionResult.failedPageCount();
                 rawText = "Parsed via Vision API. " + transactions.size() + " transactions found.";
             } catch (IOException e) {
                 log.error("Failed to load PDF file", e);
@@ -149,7 +154,7 @@ public class DocumentParserService {
         log.info("Total parsed transactions: {} (bank: {})", transactions.size(), bankName);
 
         ValidationResult validationResult = validateTransactions(transactions);
-        return Optional.of(new ParsedResult(transactions, validationResult, rawText, bankName));
+        return Optional.of(new ParsedResult(transactions, validationResult, rawText, bankName, failedPageCount, totalPageCount));
     }
 
     // ==================== DIRECT XLSX PARSER ====================
@@ -332,9 +337,10 @@ public class DocumentParserService {
     // ==================== VISION LLM PARSER (CONCURRENT PDF) ====================
 
     private record PageImage(int pageIndex, byte[] bytes) {}
-    private record PageResult(int pageIndex, List<ParsedTransaction> transactions) {}
+    private record PageResult(int pageIndex, List<ParsedTransaction> transactions, boolean failed) {}
+    private record VisionExtractionResult(List<ParsedTransaction> transactions, int failedPageCount) {}
 
-    private List<ParsedTransaction> extractWithVisionLLM(PDDocument pdf, int maxPages) {
+    private VisionExtractionResult extractWithVisionLLM(PDDocument pdf, int maxPages) {
         log.info("Starting Vision LLM parsing for {} page(s)...", maxPages);
         PDFRenderer renderer = new PDFRenderer(pdf);
 
@@ -352,7 +358,7 @@ public class DocumentParserService {
         }
 
         if (pageImages.isEmpty()) {
-            return Collections.emptyList();
+            return new VisionExtractionResult(Collections.emptyList(), 0);
         }
 
         // 2. Dispatch LLM calls concurrently on the injected parserExecutor
@@ -366,10 +372,15 @@ public class DocumentParserService {
         // 3. Wait for all concurrent tasks to finish
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
-        // 4. Collect results and sort strictly by pageIndex to preserve statement chronology
-        List<ParsedTransaction> allTransactions = futures.stream()
+        List<PageResult> results = futures.stream()
                 .map(CompletableFuture::join)
                 .sorted(Comparator.comparingInt(PageResult::pageIndex))
+                .toList();
+
+        int failedPageCount = (int) results.stream().filter(PageResult::failed).count();
+
+        // 4. Collect results, already sorted by pageIndex to preserve statement chronology
+        List<ParsedTransaction> allTransactions = results.stream()
                 .flatMap(res -> res.transactions().stream())
                 .toList();
 
@@ -378,11 +389,15 @@ public class DocumentParserService {
         if (deduped.size() != allTransactions.size()) {
             log.info("Removed {} duplicate transactions from image overlaps", allTransactions.size() - deduped.size());
         }
-        return deduped;
+        return new VisionExtractionResult(deduped, failedPageCount);
     }
 
     /**
-     * Isolated worker for an individual page with retry backoff.
+     * Isolated worker for an individual page with retry backoff. A JSON parse
+     * failure is treated the same as a network/API failure (retryable) since
+     * it can mean the response was truncated or malformed, not that the page
+     * legitimately had no transactions - parseJsonArray throws rather than
+     * swallowing for exactly that reason.
      */
     private PageResult processPageWithRetry(PageImage page, int totalPages) {
         int attempts = 0;
@@ -393,7 +408,7 @@ public class DocumentParserService {
 
                 String rawResponse = RateLimiter.decorateCallable(llmRateLimiter, () -> chat.prompt()
                         .system(PARSER_SYSTEM_PROMPT)
-                        .options(OpenAiChatOptions.builder().temperature(0.1))
+                        .options(OpenAiChatOptions.builder().temperature(0.1).maxTokens(4096).reasoningEffort("low"))
                         .user(u -> u.text("Extract all transactions from this bank statement page image into a JSON array. Return ONLY the JSON array starting with [ and ending with ].")
                                     .media(MimeTypeUtils.IMAGE_PNG, new ByteArrayResource(page.bytes())))
                         .call()
@@ -402,10 +417,9 @@ public class DocumentParserService {
                 log.info("Page {} Vision Raw Response:\n{}", page.pageIndex(), rawResponse);
 
                 List<ParsedTransaction> chunkResult = parseJsonArray(rawResponse);
-                log.info("Vision LLM returned {} transactions for page {}", 
-                         chunkResult == null ? 0 : chunkResult.size(), page.pageIndex());
+                log.info("Vision LLM returned {} transactions for page {}", chunkResult.size(), page.pageIndex());
 
-                return new PageResult(page.pageIndex(), chunkResult != null ? chunkResult : Collections.emptyList());
+                return new PageResult(page.pageIndex(), chunkResult, false);
 
             } catch (Exception e) {
                 log.error("Vision LLM failed for page {} (Attempt {})", page.pageIndex(), attempts, e);
@@ -421,50 +435,60 @@ public class DocumentParserService {
         }
 
         log.error("All retry attempts failed for page {}", page.pageIndex());
-        return new PageResult(page.pageIndex(), Collections.emptyList());
+        return new PageResult(page.pageIndex(), Collections.emptyList(), true);
     }
 
+    /**
+     * Throws (rather than swallowing) when the response couldn't be read as a
+     * JSON array at all - that's a sign of truncation/malformed output the
+     * caller should retry, distinct from a successfully-parsed array that's
+     * legitimately empty (e.g. every row was a filtered placeholder), which
+     * is a normal, non-retryable return.
+     */
     private List<ParsedTransaction> parseJsonArray(String rawResponse) {
         if (rawResponse == null || rawResponse.isBlank()) {
-            return Collections.emptyList();
+            throw new IllegalStateException("Empty response from Vision LLM");
         }
+
+        int start = rawResponse.indexOf('[');
+        int end = rawResponse.lastIndexOf(']');
+        if (start == -1 || end == -1 || end <= start) {
+            throw new IllegalStateException("No JSON array bracket found in LLM vision response (likely truncated): " + rawResponse);
+        }
+
+        String json = rawResponse.substring(start, end + 1);
+        com.fasterxml.jackson.databind.JsonNode root;
         try {
-            int start = rawResponse.indexOf('[');
-            int end = rawResponse.lastIndexOf(']');
-            if (start != -1 && end != -1 && end > start) {
-                String json = rawResponse.substring(start, end + 1);
-                com.fasterxml.jackson.databind.JsonNode root = objectMapper.readTree(json);
-                if (root.isArray()) {
-                    List<ParsedTransaction> result = new ArrayList<>();
-                    for (com.fasterxml.jackson.databind.JsonNode node : root) {
-                        String date = node.path("date").asText("").trim();
-                        String desc = node.path("description").asText("").trim();
-                        double amount = parseTurkishNumber(node.path("amount").asText("0"));
-                        double balance = parseTurkishNumber(node.path("balance").asText("0"));
-                        String merchant = node.hasNonNull("merchantName") ? node.path("merchantName").asText() : null;
-                        String bank = node.hasNonNull("bankName") ? node.path("bankName").asText() : null;
-
-                        // Filter out pending, placeholder, or zero-amount non-transactions
-                        if (amount == 0.0 && balance == 0.0) {
-                            log.info("Skipping zero-amount/balance placeholder row: '{}'", desc);
-                            continue;
-                        }
-                        if (date.isBlank() || date.equals("-") || desc.toLowerCase().contains("bekleyen işlem")) {
-                            log.info("Skipping pending/placeholder row: date='{}', desc='{}'", date, desc);
-                            continue;
-                        }
-
-                        result.add(new ParsedTransaction(date, desc, amount, balance, merchant, bank));
-                    }
-                    return result;
-                }
-            } else {
-                log.warn("No JSON array bracket found in LLM vision response: {}", rawResponse);
-            }
+            root = objectMapper.readTree(json);
         } catch (Exception e) {
-            log.error("Failed to parse JSON array from Vision LLM response: {}", rawResponse, e);
+            throw new IllegalStateException("Failed to parse JSON array from Vision LLM response: " + rawResponse, e);
         }
-        return Collections.emptyList();
+        if (!root.isArray()) {
+            throw new IllegalStateException("Vision LLM response was not a JSON array: " + rawResponse);
+        }
+
+        List<ParsedTransaction> result = new ArrayList<>();
+        for (com.fasterxml.jackson.databind.JsonNode node : root) {
+            String date = node.path("date").asText("").trim();
+            String desc = node.path("description").asText("").trim();
+            double amount = parseTurkishNumber(node.path("amount").asText("0"));
+            double balance = parseTurkishNumber(node.path("balance").asText("0"));
+            String merchant = node.hasNonNull("merchantName") ? node.path("merchantName").asText() : null;
+            String bank = node.hasNonNull("bankName") ? node.path("bankName").asText() : null;
+
+            // Filter out pending, placeholder, or zero-amount non-transactions
+            if (amount == 0.0 && balance == 0.0) {
+                log.info("Skipping zero-amount/balance placeholder row: '{}'", desc);
+                continue;
+            }
+            if (date.isBlank() || date.equals("-") || desc.toLowerCase().contains("bekleyen işlem")) {
+                log.info("Skipping pending/placeholder row: date='{}', desc='{}'", date, desc);
+                continue;
+            }
+
+            result.add(new ParsedTransaction(date, desc, amount, balance, merchant, bank));
+        }
+        return result;
     }
 
     /**
@@ -486,13 +510,20 @@ public class DocumentParserService {
         return t.date() + "|" + t.amount() + "|" + t.balance() + "|" + desc;
     }
 
+    /**
+     * Transactions are listed newest-first (standard for these statements), so
+     * `curr` is chronologically BEFORE `prev` - curr's balance is what prev's
+     * balance was before prev's own amount was applied, i.e.
+     * curr.balance == prev.balance - prev.amount (not prev.balance + curr.amount,
+     * which assumes oldest-first ordering).
+     */
     private ValidationResult validateTransactions(List<ParsedTransaction> transactions) {
         List<Integer> invalidIndices = new ArrayList<>();
         for (int i = 1; i < transactions.size(); i++) {
             ParsedTransaction prev = transactions.get(i - 1);
             ParsedTransaction curr = transactions.get(i);
             if (prev.balance() == 0 || curr.balance() == 0) continue;
-            double expected = prev.balance() + curr.amount();
+            double expected = prev.balance() - prev.amount();
             if (Math.abs(curr.balance() - expected) > 0.01) {
                 invalidIndices.add(i);
             }

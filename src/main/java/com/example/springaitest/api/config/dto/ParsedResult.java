@@ -5,6 +5,8 @@ import java.util.List;
 public record ParsedResult(List<ParsedTransaction> transactions,
         ValidationResult validation,
         String rawText,
-        String bankName) {
+        String bankName,
+        int failedPageCount,
+        int totalPageCount) {
 
 }
