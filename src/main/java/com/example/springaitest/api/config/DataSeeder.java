@@ -22,6 +22,7 @@ public class DataSeeder implements CommandLineRunner {
     private final MerchantMappingRepository merchantMappingRepo;
 
     private static final Long SYSTEM_USER_ID = 0L;
+    private static final String FALLBACK_CATEGORY_NAME = "Diğer";
 
     // Category name → emoji
     private static final Map<String, String> DEFAULT_CATEGORIES = Map.ofEntries(
@@ -108,6 +109,7 @@ public class DataSeeder implements CommandLineRunner {
         // Only seed if no system categories exist yet
         if (!categoryRepo.findByTelegramUserId(SYSTEM_USER_ID).isEmpty()) {
             log.info("Seed data already exists, skipping.");
+            repairFallbackFlagIfMissing();
             return;
         }
 
@@ -120,6 +122,7 @@ public class DataSeeder implements CommandLineRunner {
                     .emoji(emoji)
                     .telegramUserId(SYSTEM_USER_ID)
                     .custom(false)
+                    .fallback(name.equals(FALLBACK_CATEGORY_NAME))
                     .build();
             categoryRepo.save(cat);
         });
@@ -142,5 +145,20 @@ public class DataSeeder implements CommandLineRunner {
 
         log.info("Seeded {} categories and {} merchant mappings.",
                 DEFAULT_CATEGORIES.size(), DEFAULT_MERCHANTS.size());
+    }
+
+    /**
+     * One-time repair for installs seeded before the `fallback` flag existed:
+     * the "Diğer" category would already exist but with fallback=false, since
+     * seeding is skipped once categories are present.
+     */
+    private void repairFallbackFlagIfMissing() {
+        categoryRepo.findByNameAndTelegramUserId(FALLBACK_CATEGORY_NAME, SYSTEM_USER_ID)
+                .filter(cat -> !cat.isFallback())
+                .ifPresent(cat -> {
+                    cat.setFallback(true);
+                    categoryRepo.save(cat);
+                    log.info("Repaired fallback flag on existing '{}' category.", FALLBACK_CATEGORY_NAME);
+                });
     }
 }

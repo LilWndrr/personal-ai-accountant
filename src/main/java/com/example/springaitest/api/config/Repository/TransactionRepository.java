@@ -1,8 +1,10 @@
 package com.example.springaitest.api.config.Repository;
 
+import com.example.springaitest.api.config.domain.Category;
 import com.example.springaitest.api.config.domain.Transaction;
 import com.example.springaitest.api.config.domain.TransactionType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -46,4 +48,10 @@ public interface TransactionRepository extends JpaRepository<Transaction,Long> {
             @Param("userId") Long telegramUserId,
             @Param("startDate") LocalDate startDate,
             @Param("endDate") LocalDate endDate);
+
+    long countByCategory_Id(Long categoryId);
+
+    @Modifying
+    @Query("UPDATE Transaction t SET t.category = :newCategory WHERE t.category.id = :oldCategoryId")
+    int reassignCategory(@Param("oldCategoryId") Long oldCategoryId, @Param("newCategory") Category newCategory);
 }

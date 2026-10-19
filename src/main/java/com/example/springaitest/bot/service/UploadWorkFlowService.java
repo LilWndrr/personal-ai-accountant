@@ -213,7 +213,7 @@ public class UploadWorkFlowService {
             } else {
 
                 eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
-                        .chatId(chatId).text("🎉 All done! No reviews needed.").build()));
+                        .chatId(chatId).text("🎉 All done! No reviews needed.\n\n" + quotaFooter(session)).build()));
                 session.setUserState(UserState.IDLE);
 
             }
@@ -225,6 +225,14 @@ public class UploadWorkFlowService {
             userSessionService.saveSession(session);
         }
     }
+        private String quotaFooter(UserSession session) {
+            int remaining = session.getRemainingCategorizations();
+            if (remaining <= 0) {
+                return "ℹ️ That was your last upload for today — resets tomorrow.";
+            }
+            return "ℹ️ " + remaining + " upload" + (remaining == 1 ? "" : "s") + " left today.";
+        }
+
         private SendMessage buildReviewMessage(Long chatId, UserSession session) {
             CategorizedTransaction review = session.getPendingReview().get(session.getCurrentReviewIndex());
             ParsedTransaction original = session.getOriginalTransactions().get(review.transactionIndex());
@@ -236,7 +244,7 @@ public class UploadWorkFlowService {
 
             📅 Date: %s
             📝 %s
-            💰 Amount: %.2f
+            💰 Amount: %.2f ₺
             %s
             🤖 AI suggests: %s
             """,
@@ -248,6 +256,7 @@ public class UploadWorkFlowService {
                     warning,
                     review.suggestedCategory()
             );
+            text += "\n" + quotaFooter(session);
             // Build Keyboard buttons
             InlineKeyboardButton btn1 = InlineKeyboardButton.builder()
                     .text("✅ " + review.suggestedCategory())

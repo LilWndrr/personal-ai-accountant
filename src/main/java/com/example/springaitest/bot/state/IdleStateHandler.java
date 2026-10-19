@@ -2,7 +2,9 @@ package com.example.springaitest.bot.state;
 
 import com.example.springaitest.bot.commands.CommandHandler;
 import com.example.springaitest.bot.model.UserState;
+import com.example.springaitest.bot.service.CategoryManagementService;
 import com.example.springaitest.bot.service.ReportService;
+import com.example.springaitest.bot.service.TransactionEditService;
 import com.example.springaitest.bot.service.TransactionListService;
 import com.example.springaitest.bot.service.UploadWorkFlowService;
 import lombok.RequiredArgsConstructor;
@@ -16,6 +18,8 @@ public class IdleStateHandler implements StateHandler {
     private final CommandHandler commandHandler;
     private final ReportService reportService;
     private final TransactionListService transactionListService;
+    private final TransactionEditService transactionEditService;
+    private final CategoryManagementService categoryManagementService;
 
     @Override
     public UserState getSupportedState() { return UserState.IDLE; }
@@ -34,6 +38,10 @@ public class IdleStateHandler implements StateHandler {
                 transactionListService.handleTransactionsCallback(chatId, callbackData);
             } else if (callbackData.startsWith("txlist:")) {
                 transactionListService.handlePageCallback(chatId, callbackData);
+            } else if (callbackData.startsWith("tx:")) {
+                transactionEditService.handleCallback(chatId, callbackData);
+            } else if (callbackData.startsWith("catmgmt:")) {
+                categoryManagementService.handleCallback(chatId, callbackData);
             }
         }
     }

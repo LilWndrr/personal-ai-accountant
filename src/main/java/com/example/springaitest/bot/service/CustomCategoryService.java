@@ -92,7 +92,7 @@ public class CustomCategoryService {
 
             📅 Date: %s
             📝 %s
-            💰 Amount: %.2f
+            💰 Amount: %.2f ₺
             %s
             🤖 AI suggests: %s
             """,

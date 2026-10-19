@@ -84,7 +84,7 @@ public class CallbackHandlerService {
       } else if( parts[0].equals("skip")){
           int transactionIndex = Integer.parseInt(parts[1]);
           ParsedTransaction original = session.getOriginalTransactions().get(transactionIndex);
-          Category category =  categoryRepository.findByNameAndTelegramUserId("Diğer", 0L).orElse(null);
+          Category category = categoryRepository.findByTelegramUserIdAndFallbackTrue(0L).orElse(null);
 
           Transaction entity = Transaction.builder()
                   .date(LocalDate.parse(original.date(), DateTimeFormatter.ofPattern("dd[.][/][-]MM[.][/][-]yyyy")))
@@ -100,6 +100,14 @@ public class CallbackHandlerService {
                   .telegramUserId(chatId)
                   .build();
           transactionRepository.save(entity);
+
+          String filedUnder = category != null
+                  ? (category.getEmoji() != null ? category.getEmoji() + " " : "") + category.getName()
+                  : "no category";
+          eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
+                  .chatId(chatId)
+                  .text("⏭️ Skipped — filed under " + filedUnder + ".")
+                  .build()));
 
           session.setCurrentReviewIndex(session.getCurrentReviewIndex() + 1);
       }
@@ -128,7 +136,7 @@ public class CallbackHandlerService {
 
             📅 Date: %s
             📝 %s
-            💰 Amount: %.2f
+            💰 Amount: %.2f ₺
             %s
             🤖 AI suggests: %s
             """,

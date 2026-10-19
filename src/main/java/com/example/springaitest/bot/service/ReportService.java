@@ -183,7 +183,7 @@ public class ReportService {
                         BigDecimal percentage = entry.getValue()
                                 .multiply(BigDecimal.valueOf(100))
                                 .divide(totalExpenseForPercentage, 1, java.math.RoundingMode.HALF_UP);
-                        sb.append(String.format("%s: *%.2f* (%.1f%%)\n",
+                        sb.append(String.format("%s: *%.2f ₺* (%.1f%%)\n",
                                 entry.getKey(), entry.getValue(), percentage));
                     });
             sb.append("\n");
@@ -194,14 +194,14 @@ public class ReportService {
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
         if (!income.isEmpty()) {
-            sb.append("💵 *Income:* ").append(String.format("%.2f", totalIncome)).append("\n\n");
+            sb.append("💵 *Income:* ").append(String.format("%.2f ₺", totalIncome)).append("\n\n");
         }
 
         BigDecimal net = totalIncome.subtract(totalExpense);
         String netEmoji = net.signum() < 0 ? "🔴" : "🟢";
-        sb.append("Total Income: *").append(String.format("%.2f", totalIncome)).append("*\n");
-        sb.append("Total Expenses: *").append(String.format("%.2f", totalExpense)).append("*\n");
-        sb.append(netEmoji).append(" *Net: ").append(String.format("%.2f", net)).append("*");
+        sb.append("Total Income: *").append(String.format("%.2f ₺", totalIncome)).append("*\n");
+        sb.append("Total Expenses: *").append(String.format("%.2f ₺", totalExpense)).append("*\n");
+        sb.append(netEmoji).append(" *Net: ").append(String.format("%.2f ₺", net)).append("*");
 
         eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
                 .chatId(chatId)

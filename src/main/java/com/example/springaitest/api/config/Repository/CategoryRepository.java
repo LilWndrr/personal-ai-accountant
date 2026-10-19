@@ -16,6 +16,8 @@ public interface CategoryRepository extends JpaRepository<Category,Long> {
 
    boolean existsByNameAndTelegramUserId(String name, Long telegramUserId);
 
+   Optional<Category> findByTelegramUserIdAndFallbackTrue(Long telegramUserId);
+
    /**
     * Finds an existing category (user-scoped, falling back to the shared system
     * default) or creates a new user-scoped one. Not atomic by itself, so a

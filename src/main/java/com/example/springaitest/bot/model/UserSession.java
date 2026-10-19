@@ -36,4 +36,7 @@ public class UserSession {
     private int remainingCategorizations;
     private java.time.LocalDate lastCategorizationDate;
 
+    private Long editingTransactionId;
+    private Long editingCategoryId;
+
 }

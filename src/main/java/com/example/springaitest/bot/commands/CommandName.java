@@ -7,7 +7,9 @@ public enum CommandName {
 
     REPORT("REPORT_COMMAND"),
 
-    TRANSACTIONS("TRANSACTIONS_COMMAND");
+    TRANSACTIONS("TRANSACTIONS_COMMAND"),
+
+    CATEGORIES("CATEGORIES_COMMAND");
 
     private final String name;
 

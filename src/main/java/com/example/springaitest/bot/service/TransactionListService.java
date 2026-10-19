@@ -161,6 +161,8 @@ public class TransactionListService {
         StringBuilder sb = new StringBuilder();
         sb.append("📋 *Transactions* (page ").append(page + 1).append("/").append(totalPages).append(")\n\n");
 
+        List<InlineKeyboardRow> actionRows = new ArrayList<>();
+        int rowNumber = 1;
         for (Transaction t : pageItems) {
             String emoji = t.getCategory() != null && t.getCategory().getEmoji() != null
                     ? t.getCategory().getEmoji() + " " : "";
@@ -170,11 +172,18 @@ public class TransactionListService {
                     ? t.getDescription().substring(0, 40) + "…"
                     : t.getDescription();
 
-            sb.append(String.format("%s %s%s | %s%.2f\n%s\n\n",
+            sb.append(String.format("%d. %s %s%s | %s%.2f ₺\n%s\n\n",
+                    rowNumber,
                     t.getDate().format(DISPLAY_DATE_FORMAT),
                     emoji, categoryName,
                     sign, t.getAmount().abs(),
                     description));
+
+            actionRows.add(new InlineKeyboardRow(InlineKeyboardButton.builder()
+                    .text("⚙️ " + rowNumber)
+                    .callbackData("tx:open:" + t.getId())
+                    .build()));
+            rowNumber++;
         }
 
         List<InlineKeyboardButton> navButtons = new ArrayList<>();
@@ -190,10 +199,11 @@ public class TransactionListService {
                     .callbackData("txlist:" + startDate + ":" + endDate + ":" + (page + 1))
                     .build());
         }
+        if (!navButtons.isEmpty()) {
+            actionRows.add(new InlineKeyboardRow(navButtons));
+        }
 
-        InlineKeyboardMarkup keyboard = navButtons.isEmpty() ? null : InlineKeyboardMarkup.builder()
-                .keyboardRow(new InlineKeyboardRow(navButtons))
-                .build();
+        InlineKeyboardMarkup keyboard = InlineKeyboardMarkup.builder().keyboard(actionRows).build();
 
         eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
                 .chatId(chatId)

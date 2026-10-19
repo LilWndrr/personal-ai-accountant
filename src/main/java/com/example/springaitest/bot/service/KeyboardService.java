@@ -25,6 +25,7 @@ public class KeyboardService {
         // Second row
         KeyboardRow row2 = new KeyboardRow();
         row2.add("Transactions");
+        row2.add("Categories");
         keyboard.add(row2);
         // Keyboard settings
         ReplyKeyboardMarkup keyboardMarkup = new ReplyKeyboardMarkup(keyboard);
