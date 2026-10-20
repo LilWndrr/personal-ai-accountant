@@ -38,6 +38,10 @@ public class CategorizationService {
     @Value("${app.categorization.model}")
     private String categorizationModel;
 
+    // Blank means "don't send reasoning_effort" for providers that reject it.
+    @Value("${app.ai.reasoning-effort:}")
+    private String reasoningEffort;
+
     public CategorizationService(
             ChatModel chatModel,
             MerchantMappingRepository merchantMappingRepository,
@@ -186,7 +190,7 @@ public class CategorizationService {
                     .model(categorizationModel)
                     .temperature(0.3)
                     .maxTokens(8192)
-                    .reasoningEffort("low")
+                    .reasoningEffort(reasoningEffort.isBlank() ? null : reasoningEffort)
                     .build();
 
             org.springframework.ai.chat.prompt.Prompt prompt = new org.springframework.ai.chat.prompt.Prompt(

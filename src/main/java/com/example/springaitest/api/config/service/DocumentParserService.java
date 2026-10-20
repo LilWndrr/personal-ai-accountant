@@ -14,6 +14,7 @@ import org.apache.poi.ss.usermodel.*;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -48,6 +49,10 @@ public class DocumentParserService {
 
     private final Executor parserExecutor;
     private final RateLimiter llmRateLimiter;
+
+    // Blank means "don't send reasoning_effort" for providers that reject it.
+    @Value("${app.ai.reasoning-effort:}")
+    private String reasoningEffort;
 
     public DocumentParserService(@Qualifier("financeChatClient") ChatClient chat,
                                   @Qualifier("documentParserExecutor") Executor executor,
@@ -408,7 +413,7 @@ public class DocumentParserService {
 
                 String rawResponse = RateLimiter.decorateCallable(llmRateLimiter, () -> chat.prompt()
                         .system(PARSER_SYSTEM_PROMPT)
-                        .options(OpenAiChatOptions.builder().temperature(0.1).maxTokens(4096).reasoningEffort("low"))
+                        .options(OpenAiChatOptions.builder().temperature(0.1).maxTokens(4096).reasoningEffort(reasoningEffort.isBlank() ? null : reasoningEffort))
                         .user(u -> u.text("Extract all transactions from this bank statement page image into a JSON array. Return ONLY the JSON array starting with [ and ending with ].")
                                     .media(MimeTypeUtils.IMAGE_PNG, new ByteArrayResource(page.bytes())))
                         .call()

@@ -3,6 +3,7 @@ package com.example.springaitest.api.config;
 import io.github.resilience4j.ratelimiter.RateLimiter;
 import io.github.resilience4j.ratelimiter.RateLimiterConfig;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -15,14 +16,14 @@ public class ModelConfig {
      * Shared across every call site that hits the LLM provider (vision parsing
      * and categorization both use the same API key/account), since the limit
      * is enforced by the provider per-account, not per-feature.
-     * Capped below OpenRouter's published free-tier limit of 20 requests/minute
-     * (applies regardless of credits purchased) to leave headroom for clock-skew
-     * between our refresh window and theirs.
+     * Defaults to 18/min, just below OpenRouter's published free-tier limit of
+     * 20 requests/minute, to leave headroom for clock-skew between our refresh
+     * window and theirs. Set AI_RATE_LIMIT_PER_MINUTE when changing provider/plan.
      */
     @Bean
-    public RateLimiter llmRateLimiter() {
+    public RateLimiter llmRateLimiter(@Value("${app.ai.rate-limit-per-minute}") int requestsPerMinute) {
         RateLimiterConfig config = RateLimiterConfig.custom()
-                .limitForPeriod(18)
+                .limitForPeriod(requestsPerMinute)
                 .limitRefreshPeriod(Duration.ofMinutes(1))
                 .timeoutDuration(Duration.ofSeconds(30))
                 .build();

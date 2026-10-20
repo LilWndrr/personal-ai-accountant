@@ -1,0 +1,14 @@
+target/
+logs/
+.git/
+.idea/
+.vscode/
+.mvn/
+mvnw
+mvnw.cmd
+*.iml
+.env
+.env.*
+ai-response-debug.txt
+CheckConstructors.java
+HELP.md
