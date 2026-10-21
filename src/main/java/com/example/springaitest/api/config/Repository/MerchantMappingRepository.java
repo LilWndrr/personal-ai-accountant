@@ -1,7 +1,9 @@
 package com.example.springaitest.api.config.Repository;
 
+import com.example.springaitest.api.config.domain.Category;
 import com.example.springaitest.api.config.domain.MerchantMapping;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
@@ -23,4 +25,14 @@ public interface MerchantMappingRepository extends JpaRepository<MerchantMapping
     List<MerchantMapping> findByTelegramUserIdOrTelegramUserId(Long userId, Long systemId);
 
     boolean existsByMerchantKeywordAndTelegramUserId(String merchantKeyword, Long telegramUserId);
+
+    /** Points a category's learned merchant rules at another category (merge / move-then-delete). */
+    @Modifying
+    @Query("UPDATE MerchantMapping m SET m.category = :newCategory WHERE m.category.id = :oldCategoryId")
+    int reassignCategory(@Param("oldCategoryId") Long oldCategoryId, @Param("newCategory") Category newCategory);
+
+    /** Removes a category's learned merchant rules; they must go before the category itself can be deleted. */
+    @Modifying
+    @Query("DELETE FROM MerchantMapping m WHERE m.category.id = :categoryId")
+    int deleteByCategoryId(@Param("categoryId") Long categoryId);
 }

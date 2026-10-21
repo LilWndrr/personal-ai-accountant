@@ -73,6 +73,7 @@ public class CategorizationService {
 
 
     public CategorizationResult categorize(List<ParsedTransaction> transactions, Long userId) {
+        long startedAt = System.currentTimeMillis();
 
         List<CategorizedTransaction> autoCategorized = new ArrayList<>();
         List<Integer> needsAiIndices = new ArrayList<>();
@@ -109,20 +110,28 @@ public class CategorizationService {
             // daily request cap); 75 keeps individual responses comfortably within
             // maxTokens while cutting call count by ~3x versus the old batch of 25.
             int batchSize = 75;
+            int batchCount = (needsAiIndices.size() + batchSize - 1) / batchSize;
+            log.info("Categorizing {} transactions: {} matched saved rules, {} sent to AI in {} batch(es)",
+                    transactions.size(), autoCategorized.size(), needsAiIndices.size(), batchCount);
             List<CategorizedTransaction> allAiResults = new ArrayList<>();
 
             for (int batchStart = 0; batchStart < needsAiIndices.size(); batchStart += batchSize) {
                 int batchEnd = Math.min(batchStart + batchSize, needsAiIndices.size());
+                int batchNumber = batchStart / batchSize + 1;
                 List<Integer> batchIndices = needsAiIndices.subList(batchStart, batchEnd);
                 List<ParsedTransaction> batchTransactions = batchIndices.stream()
                         .map(transactions::get)
                         .toList();
 
+                long batchStartedAt = System.currentTimeMillis();
                 try {
                     List<CategorizedTransaction> batchResults = callLLMforCategorization(batchTransactions, batchIndices, allCategoryNames);
                     allAiResults.addAll(batchResults);
+                    log.info("AI batch {}/{} done: {} transactions in {}s",
+                            batchNumber, batchCount, batchResults.size(), seconds(batchStartedAt));
                 } catch (Exception e) {
-                    log.warn("LLM categorization failed for batch: {}", e.getMessage());
+                    log.warn("AI batch {}/{} failed after {}s, sending its {} transactions to manual review: {}",
+                            batchNumber, batchCount, seconds(batchStartedAt), batchTransactions.size(), e.getMessage());
                     // Fallback: Send this batch to manual review if AI fails
                     for (int i = 0; i < batchTransactions.size(); i++) {
                         ParsedTransaction tx = batchTransactions.get(i);
@@ -147,7 +156,51 @@ public class CategorizationService {
             }
         }
 
+        logResults(transactions, autoCategorized, needsReview, startedAt);
         return new CategorizationResult(autoCategorized, needsReview);
+    }
+
+    /**
+     * INFO: totals and the most used categories. DEBUG: one line per transaction.
+     * Per-transaction lines contain real bank descriptions and amounts, so they
+     * stay off unless APP_LOG_LEVEL=DEBUG (local debugging, never production).
+     */
+    private void logResults(List<ParsedTransaction> transactions, List<CategorizedTransaction> autoCategorized,
+                            List<CategorizedTransaction> needsReview, long startedAt) {
+        String topCategories = java.util.stream.Stream.concat(autoCategorized.stream(), needsReview.stream())
+                .collect(java.util.stream.Collectors.groupingBy(CategorizedTransaction::suggestedCategory,
+                        java.util.stream.Collectors.counting()))
+                .entrySet().stream()
+                .sorted(java.util.Map.Entry.<String, Long>comparingByValue().reversed())
+                .limit(8)
+                .map(e -> e.getKey() + " " + e.getValue())
+                .collect(java.util.stream.Collectors.joining(", "));
+        log.info("Categorization done in {}s: {} auto-categorized, {} need review (confidence < {}). Top: {}",
+                seconds(startedAt), autoCategorized.size(), needsReview.size(), confidenceThreshold, topCategories);
+
+        if (!log.isDebugEnabled()) return;
+        java.util.stream.Stream.concat(
+                        autoCategorized.stream().map(ct -> java.util.Map.entry(ct, "auto")),
+                        needsReview.stream().map(ct -> java.util.Map.entry(ct, "REVIEW")))
+                .sorted(java.util.Comparator.comparingInt(e -> e.getKey().transactionIndex()))
+                .forEach(e -> {
+                    CategorizedTransaction ct = e.getKey();
+                    ParsedTransaction tx = transactions.get(ct.transactionIndex());
+                    log.debug("[{}] {} {} {} → {} {} ({}, {})",
+                            ct.transactionIndex(), tx.date(), "%10.2f".formatted(tx.amount()),
+                            abbreviate(tx.description(), 45), ct.suggestedEmoji(), ct.suggestedCategory(),
+                            "%.2f".formatted(ct.confidence()), e.getValue());
+                });
+    }
+
+    private static String seconds(long startedAt) {
+        return "%.1f".formatted((System.currentTimeMillis() - startedAt) / 1000.0);
+    }
+
+    private static String abbreviate(String text, int max) {
+        if (text == null) return "";
+        String oneLine = text.replaceAll("\\s+", " ").trim();
+        return oneLine.length() <= max ? oneLine : oneLine.substring(0, max - 1) + "…";
     }
 
     private List<CategorizedTransaction> callLLMforCategorization(
@@ -204,7 +257,7 @@ public class CategorizationService {
             Callable<String> rateLimitedCall = RateLimiter.decorateCallable(llmRateLimiter,
                     () -> chatModel.call(prompt).getResult().getOutput().getText());
             responseText = rateLimitedCall.call();
-            log.debug("AI response: {}", responseText);
+            log.trace("AI response: {}", responseText);
 
             com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
             mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);

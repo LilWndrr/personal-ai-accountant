@@ -23,9 +23,6 @@ import org.springframework.stereotype.Service;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendChatAction;
 import org.telegram.telegrambots.meta.api.objects.Document;
-import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
-import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
-import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardRow;
 import org.springframework.scheduling.annotation.Async;
 
 import java.io.InputStream;
@@ -35,6 +32,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 
@@ -140,7 +138,9 @@ public class UploadWorkFlowService {
             }
 
             String bankName = parsedResult.bankName();
-            List<ParsedTransaction> parsedTransactions = parsedResult.transactions();
+            // Keys are assigned over the whole statement, before any filtering, so the
+            // same statement always produces the same keys (see TransactionDeduplicationService).
+            List<ParsedTransaction> parsedTransactions = deduplicationService.assignKeys(parsedResult.transactions());
 
             // Captured before dedup filtering (which re-indexes the list) so we can
             // still tell which surviving transactions were flagged, by identity rather than index.
@@ -149,15 +149,25 @@ public class UploadWorkFlowService {
                 flaggedForBalanceMismatch.add(parsedTransactions.get(invalidIndex));
             }
 
-            // Filter out duplicate transactions that already exist in the database
-            int totalParsed = parsedTransactions.size();
-            parsedTransactions = deduplicationService.filterDuplicates(parsedTransactions, bankName, chatId);
-            int duplicateCount = totalParsed - parsedTransactions.size();
+            // Drop transactions already saved; ones that only look like a saved one
+            // (same transaction from another file format) are kept for the user to confirm.
+            TransactionDeduplicationService.DedupResult dedup = deduplicationService.check(parsedTransactions, chatId);
+            parsedTransactions = dedup.newTransactions();
+            int duplicateCount = dedup.exactDuplicates();
+            Map<String, Transaction> likelyDuplicates = dedup.likelyDuplicates();
 
             if (duplicateCount > 0) {
                 eventPublisher.publishEvent(new MessageEvent(this,
                         SendMessage.builder().chatId(chatId)
                                 .text("⚠️ Skipped " + duplicateCount + " duplicate transaction(s) already in your records.")
+                                .build()
+                ));
+            }
+            if (!likelyDuplicates.isEmpty()) {
+                eventPublisher.publishEvent(new MessageEvent(this,
+                        SendMessage.builder().chatId(chatId)
+                                .text("🔎 " + likelyDuplicates.size() + " transaction(s) look like ones you already have"
+                                        + " — I'll ask you before saving them.")
                                 .build()
                 ));
             }
@@ -177,21 +187,33 @@ public class UploadWorkFlowService {
 
             String batchId = UUID.randomUUID().toString();
             List<Transaction> entitiesToSave = new ArrayList<>();
-            List<CategorizedTransaction> needsReview = new ArrayList<>(categorizationResult.needsReview());
+            List<CategorizedTransaction> needsReview = new ArrayList<>();
+            for (CategorizedTransaction ct : categorizationResult.needsReview()) {
+                Transaction saved = likelyDuplicates.get(parsedTransactions.get(ct.transactionIndex()).dedupKey());
+                needsReview.add(saved != null ? ReviewMessages.flagLikelyDuplicate(ct, saved) : ct);
+            }
 
             for (CategorizedTransaction ct : categorizationResult.autoCategorized()) {
 
                 ParsedTransaction original = parsedTransactions.get(ct.transactionIndex());
 
+                CategorizedTransaction toReview = null;
                 if (flaggedForBalanceMismatch.contains(original)) {
-                    needsReview.add(new CategorizedTransaction(
+                    toReview = new CategorizedTransaction(
                             ct.transactionIndex(),
                             ct.suggestedCategory(),
                             ct.suggestedEmoji(),
                             ct.confidence(),
                             ct.merchantName(),
                             "⚠️ Balance mismatch detected — please double-check this amount. " + ct.reasoning()
-                    ));
+                    );
+                }
+                Transaction saved = likelyDuplicates.get(original.dedupKey());
+                if (saved != null) {
+                    toReview = ReviewMessages.flagLikelyDuplicate(toReview != null ? toReview : ct, saved);
+                }
+                if (toReview != null) {
+                    needsReview.add(toReview);
                     continue;
                 }
 
@@ -209,11 +231,17 @@ public class UploadWorkFlowService {
                         .uploadBatchId(batchId)
                         .uploadedAt(LocalDateTime.now())
                         .telegramUserId(chatId)
+                        .dedupKey(deduplicationService.keyOf(original))
                         .build();
                 entitiesToSave.add(entity);
 
             }
-            transactionRepository.saveAll(entitiesToSave);
+            // Row by row so a transaction saved concurrently (e.g. the same file sent
+            // twice at once) is skipped instead of failing the whole batch.
+            long alreadySaved = entitiesToSave.stream().filter(e -> !transactionRepository.saveIfNew(e)).count();
+            if (alreadySaved > 0) {
+                log.info("Skipped {} transactions saved concurrently for user {}", alreadySaved, chatId);
+            }
             if (!needsReview.isEmpty()) {
 
                 session.setPendingReview(needsReview);
@@ -247,55 +275,7 @@ public class UploadWorkFlowService {
         }
 
         private SendMessage buildReviewMessage(Long chatId, UserSession session) {
-            CategorizedTransaction review = session.getPendingReview().get(session.getCurrentReviewIndex());
-            ParsedTransaction original = session.getOriginalTransactions().get(review.transactionIndex());
-            String warning = review.reasoning() != null && review.reasoning().startsWith("⚠️")
-                    ? "\n" + review.reasoning() + "\n"
-                    : "";
-            String text = String.format("""
-            📍 Transaction %d/%d
-
-            📅 Date: %s
-            📝 %s
-            💰 Amount: %.2f ₺
-            %s
-            🤖 AI suggests: %s
-            """,
-                    session.getCurrentReviewIndex() + 1,
-                    session.getPendingReview().size(),
-                    original.date(),
-                    original.description(),
-                    original.amount(),
-                    warning,
-                    review.suggestedCategory()
-            );
-            text += "\n" + quotaFooter(session);
-            // Build Keyboard buttons
-            InlineKeyboardButton btn1 = InlineKeyboardButton.builder()
-                    .text("✅ " + review.suggestedCategory())
-                    .callbackData("cat:" + review.transactionIndex() + ":" + review.suggestedCategory())
-                    .build();
-
-            InlineKeyboardButton btnSkip = InlineKeyboardButton.builder()
-                    .text("⏭️ Skip")
-                    .callbackData("skip:" + review.transactionIndex())
-                    .build();
-
-            InlineKeyboardButton btnNew = InlineKeyboardButton.builder()
-                    .text("➕ New Category")
-                    .callbackData("new:" + review.transactionIndex())
-                    .build();
-
-            InlineKeyboardMarkup keyboard = InlineKeyboardMarkup.builder()
-                    .keyboardRow(new InlineKeyboardRow(btn1))
-                    .keyboardRow(new InlineKeyboardRow(btnSkip))
-                    .keyboardRow(new InlineKeyboardRow(btnNew))
-                    .build();
-            return SendMessage.builder()
-                    .chatId(chatId)
-                    .text(text)
-                    .replyMarkup(keyboard)
-                    .build();
+            return ReviewMessages.build(chatId, session, quotaFooter(session));
         }
     }
 

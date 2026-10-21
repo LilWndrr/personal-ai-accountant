@@ -10,6 +10,7 @@ import com.example.springaitest.api.config.domain.Transaction;
 import com.example.springaitest.api.config.domain.TransactionType;
 import com.example.springaitest.api.config.dto.CategorizedTransaction;
 import com.example.springaitest.api.config.dto.ParsedTransaction;
+import com.example.springaitest.api.config.service.TransactionDeduplicationService;
 import com.example.springaitest.bot.events.MessageEvent;
 import com.example.springaitest.bot.model.UserSession;
 import com.example.springaitest.bot.model.UserState;
@@ -17,14 +18,12 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
-import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
-import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
-import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardRow;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 
 @Service
 @RequiredArgsConstructor
@@ -34,24 +33,26 @@ public class CallbackHandlerService {
     private final UserSessionService sessionService;
     private final CategoryRepository categoryRepository;
     private final TransactionRepository transactionRepository;
+    private final TransactionDeduplicationService deduplicationService;
     private final MerchantMappingRepository merchantMappingRepository;
     private final MessageTrackerService messageTrackerService;
+    private final CustomCategoryService customCategoryService;
 
     public void handleCallback(Long chatId, String data){
         UserSession session = sessionService.getSession(chatId);
+      String[] parts =  data.split(":");
+
+        // A tap on a review item that is no longer current (double tap, or Telegram
+        // redelivering the update after a restart) is ignored before anything happens:
+        // otherwise it would delete the live review message and act on the wrong item.
+        if (session.getUserState() == UserState.REVIEWING && !isCurrentReviewItem(session, parts)) return;
 
         messageTrackerService.deleteLastMessage(chatId);
-      String[] parts =  data.split(":");
 
         if (session.getUserState() != UserState.REVIEWING) return;
 
       if(parts[0].equals("new")){
-          session.setUserState(UserState.CREATING_CATEGORY);
-          sessionService.saveSession(session);
-          eventPublisher.publishEvent(new MessageEvent(this, SendMessage
-                  .builder()
-                  .chatId(chatId)
-                  .text("Waiting for input").build()));
+          customCategoryService.showPicker(chatId, session);
           return;
       }else if(parts[0].equals("cat") ){
         int transactionIndex = Integer.parseInt(parts[1]);
@@ -73,12 +74,21 @@ public class CallbackHandlerService {
                   .uploadBatchId(session.getUploadBatch())
                   .uploadedAt(LocalDateTime.now())
                   .telegramUserId(chatId)
+                  .dedupKey(deduplicationService.keyOf(original))
                   .build();
 
           // Learn: save merchant mapping so this merchant auto-categorizes next time
           saveMerchantMappingIfNew(original.merchantName(), category, chatId, MappingSource.USER_CONFIRMED);
-          transactionRepository.save(entity);
+          transactionRepository.saveIfNew(entity);
           
+          session.setCurrentReviewIndex(session.getCurrentReviewIndex() + 1);
+
+      } else if (parts[0].equals("dup")) {
+          // The user confirmed this is a transaction they already have: don't save it.
+          eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
+                  .chatId(chatId)
+                  .text("🚫 Not saved — it's already in your records.")
+                  .build()));
           session.setCurrentReviewIndex(session.getCurrentReviewIndex() + 1);
 
       } else if( parts[0].equals("skip")){
@@ -98,8 +108,9 @@ public class CallbackHandlerService {
                   .uploadBatchId(session.getUploadBatch())
                   .uploadedAt(LocalDateTime.now())
                   .telegramUserId(chatId)
+                  .dedupKey(deduplicationService.keyOf(original))
                   .build();
-          transactionRepository.save(entity);
+          transactionRepository.saveIfNew(entity);
 
           String filedUnder = category != null
                   ? (category.getEmoji() != null ? category.getEmoji() + " " : "") + category.getName()
@@ -125,55 +136,17 @@ public class CallbackHandlerService {
         sessionService.saveSession(session);
     }
 
+    // Callback data is "<action>:<transactionIndex>[:...]"; it is current only if
+    // that index is the transaction the review is waiting on right now.
+    private boolean isCurrentReviewItem(UserSession session, String[] parts) {
+        List<CategorizedTransaction> pending = session.getPendingReview();
+        int current = session.getCurrentReviewIndex();
+        if (parts.length < 2 || pending == null || current < 0 || current >= pending.size()) return false;
+        return parts[1].equals(String.valueOf(pending.get(current).transactionIndex()));
+    }
+
     private SendMessage buildReviewMessage(Long chatId, UserSession session) {
-        CategorizedTransaction review = session.getPendingReview().get(session.getCurrentReviewIndex());
-        ParsedTransaction original = session.getOriginalTransactions().get(review.transactionIndex());
-        String warning = review.reasoning() != null && review.reasoning().startsWith("⚠️")
-                ? "\n" + review.reasoning() + "\n"
-                : "";
-        String text = String.format("""
-            📍 Transaction %d/%d
-
-            📅 Date: %s
-            📝 %s
-            💰 Amount: %.2f ₺
-            %s
-            🤖 AI suggests: %s
-            """,
-                session.getCurrentReviewIndex() + 1,
-                session.getPendingReview().size(),
-                original.date(),
-                original.description(),
-                original.amount(),
-                warning,
-                review.suggestedCategory()
-        );
-
-        InlineKeyboardButton btn1 = InlineKeyboardButton.builder()
-                .text("✅ " + review.suggestedCategory())
-                .callbackData("cat:" + review.transactionIndex() + ":" + review.suggestedCategory())
-                .build();
-
-        InlineKeyboardButton btnSkip = InlineKeyboardButton.builder()
-                .text("⏭️ Skip")
-                .callbackData("skip:" + review.transactionIndex())
-                .build();
-
-        InlineKeyboardButton btnNew = InlineKeyboardButton.builder()
-                .text("➕ New Category")
-                .callbackData("new:" + review.transactionIndex())
-                .build();
-
-        InlineKeyboardMarkup keyboard = InlineKeyboardMarkup.builder()
-                .keyboardRow(new InlineKeyboardRow(btn1))
-                .keyboardRow(new InlineKeyboardRow(btnSkip))
-                .keyboardRow(new InlineKeyboardRow(btnNew))
-                .build();
-        return SendMessage.builder()
-                .chatId(chatId)
-                .text(text)
-                .replyMarkup(keyboard)
-                .build();
+        return ReviewMessages.build(chatId, session, null);
     }
 
     private void saveMerchantMappingIfNew(String merchantName, Category category, Long chatId, MappingSource source) {

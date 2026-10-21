@@ -1,12 +1,12 @@
 package com.example.springaitest.bot.service;
 
 import com.example.springaitest.api.config.Repository.CategoryRepository;
+import com.example.springaitest.api.config.Repository.MerchantMappingRepository;
 import com.example.springaitest.api.config.Repository.TransactionRepository;
 import com.example.springaitest.api.config.domain.Category;
 import com.example.springaitest.bot.events.MessageEvent;
 import com.example.springaitest.bot.model.UserSession;
 import com.example.springaitest.bot.model.UserState;
-import jakarta.validation.ConstraintViolationException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
@@ -36,6 +36,7 @@ public class CategoryManagementService {
 
     private final CategoryRepository categoryRepository;
     private final TransactionRepository transactionRepository;
+    private final MerchantMappingRepository merchantMappingRepository;
     private final UserSessionService userSessionService;
     private final ApplicationEventPublisher eventPublisher;
     private final MessageTrackerService messageTrackerService;
@@ -98,6 +99,7 @@ public class CategoryManagementService {
             case "rename" -> promptForRename(chatId, category);
             case "del" -> sendDeletePrompt(chatId, category);
             case "delyes" -> {
+                merchantMappingRepository.deleteByCategoryId(category.getId());
                 categoryRepository.delete(category);
                 eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
                         .chatId(chatId)
@@ -113,6 +115,7 @@ public class CategoryManagementService {
                     if (target.isEmpty()) return;
 
                     int moved = transactionRepository.reassignCategory(category.getId(), target.get());
+                    merchantMappingRepository.reassignCategory(category.getId(), target.get());
                     categoryRepository.delete(category);
                     eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
                             .chatId(chatId)
@@ -127,6 +130,13 @@ public class CategoryManagementService {
         }
     }
 
+    /**
+     * Renames a category. If the user already has a category with that name
+     * (their own, or a shared default), the two are merged instead: its
+     * transactions and learned merchant rules move to the existing one and it is
+     * deleted, so reports don't show the same name twice.
+     */
+    @Transactional
     public void handleRenameInput(Long chatId, String newName) {
         UserSession session = userSessionService.getSession(chatId);
         Long categoryId = session.getEditingCategoryId();
@@ -137,7 +147,7 @@ public class CategoryManagementService {
 
         if (categoryId == null) return;
 
-            Optional<Category> maybeCategory = findOwned(chatId, categoryId);
+        Optional<Category> maybeCategory = findOwned(chatId, categoryId);
         if (maybeCategory.isEmpty()) {
             eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
                     .chatId(chatId)
@@ -145,12 +155,12 @@ public class CategoryManagementService {
                     .build()));
             return;
         }
-
         Category category = maybeCategory.get();
-        category.setName(newName.trim());
-        try {
-            categoryRepository.save(category);
-        } catch (ConstraintViolationException e) {
+
+        String name = CategoryNames.clean(newName);
+        // Checked here rather than via the entity's @Size: inside this transaction
+        // validation would only run at commit, after the user was told it worked.
+        if (name.length() < 2 || name.length() > 20) {
             eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
                     .chatId(chatId)
                     .text("⚠️ Category names must be 2–20 characters. Try again, or /cancel.")
@@ -158,11 +168,49 @@ public class CategoryManagementService {
             return;
         }
 
+        Optional<Category> sameName = findByName(chatId, name, category.getId());
+        if (sameName.isPresent()) {
+            mergeInto(chatId, category, sameName.get());
+            return;
+        }
+
+        category.setName(name);
+        categoryRepository.save(category);
+
         eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
                 .chatId(chatId)
                 .text("✅ Renamed to " + displayName(category) + ".")
                 .build()));
     }
+
+    private void mergeInto(Long chatId, Category source, Category target) {
+        int moved = transactionRepository.reassignCategory(source.getId(), target);
+        merchantMappingRepository.reassignCategory(source.getId(), target);
+        categoryRepository.delete(source);
+        log.info("Merged category {} into {} for user {} ({} transactions moved)",
+                source.getId(), target.getId(), chatId, moved);
+
+        eventPublisher.publishEvent(new MessageEvent(this, SendMessage.builder()
+                .chatId(chatId)
+                .text("🔀 You already have " + displayName(target) + ", so I merged " + displayName(source)
+                        + " into it (" + moved + " transaction(s) moved).")
+                .build()));
+    }
+
+    /**
+     * The user's own category with this name (see CategoryNames.key),
+     * else the shared default with it; never the category being renamed.
+     */
+    private Optional<Category> findByName(Long chatId, String name, Long excludeId) {
+        String wanted = CategoryNames.key(name);
+        return Stream.concat(
+                        categoryRepository.findByTelegramUserId(chatId).stream(),
+                        categoryRepository.findByTelegramUserId(0L).stream())
+                .filter(c -> !c.getId().equals(excludeId))
+                .filter(c -> CategoryNames.key(c.getName()).equals(wanted))
+                .findFirst();
+    }
+
 
     private Optional<Category> findOwned(Long chatId, Long categoryId) {
         return categoryRepository.findById(categoryId)

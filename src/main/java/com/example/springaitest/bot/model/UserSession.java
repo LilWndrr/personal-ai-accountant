@@ -39,4 +39,8 @@ public class UserSession {
     private Long editingTransactionId;
     private Long editingCategoryId;
 
+    // Name typed in the category picker, kept until the user taps "Create" for it
+    // (too long for Telegram's 64-byte callback data).
+    private String pendingCategoryName;
+
 }
