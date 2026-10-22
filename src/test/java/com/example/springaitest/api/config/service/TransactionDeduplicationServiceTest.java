@@ -86,7 +86,7 @@ class TransactionDeduplicationServiceTest {
         assertThat(result.exactDuplicates()).isEqualTo(3);
         assertThat(result.likelyDuplicates()).isEmpty();
     }
-
+    
     @Test
     void keyMatchesTheSavedEntity() {
         ParsedTransaction parsed = service.assignKeys(List.of(tx("2026-10-05", "  Migros   ATASEHIR ", -120.5, 880.25))).get(0);
