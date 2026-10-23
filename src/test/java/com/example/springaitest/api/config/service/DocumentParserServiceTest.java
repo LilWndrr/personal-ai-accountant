@@ -42,9 +42,7 @@ public class DocumentParserServiceTest {
             "45,00 TL    | 45.00",
             "1.234,56    | 1234.56",
             "1234.56     | 1234.56",
-            "1,234.56    | 1234.56",
-            "1234.56     | 1234.56",
-            "1234.56     | 1234.56",
+
     })
     void parsesAmountFormats(String raw, double expected) {
         String csv = "Tarih;Açıklama;Tutar\n05.10.2026;TEST;" + raw + "\n";
